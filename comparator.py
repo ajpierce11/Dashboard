@@ -42,26 +42,16 @@ COLOR_SEQUENCE = px.colors.qualitative.D3
 # Data loading
 # ---------------------------------------------------------------------------
 
+def _workbook_mtime() -> float:
+    try:
+        return Path(FILE_PATH).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 @st.cache_data
-def load_data() -> tuple[pd.DataFrame, list[str], dict[str, str], pd.DataFrame]:
-    """
-    Load and reshape the Excel workbook.
-
-    Expected column layout (0-indexed):
-      0        : Product name
-      1–6      : Mean values at each timepoint
-      7–12     : Corresponding std deviations
-      13       : (unused / spacer)
-      14       : Reference / lot number
-      15–19    : Static material properties (STATIC_PROPERTIES)
-
-    Returns
-    -------
-    df_long : long-form DataFrame with columns Product, Timepoint, Average, StdDev
-    timepoints : ordered list of timepoint labels
-    product_to_ref : mapping from product name → reference string
-    product_properties : DataFrame indexed by Product with static property columns
-    """
+def _load_data_cached(mtime: float) -> tuple[pd.DataFrame, list[str], dict[str, str], pd.DataFrame]:
+    """Cached by workbook mtime — edits on the network drive invalidate automatically."""
     df_raw = pd.read_excel(FILE_PATH, header=0)
 
     # --- Identify timepoint and std columns by position ---
@@ -93,6 +83,22 @@ def load_data() -> tuple[pd.DataFrame, list[str], dict[str, str], pd.DataFrame]:
     product_properties = df_raw[["Product"] + STATIC_PROPERTIES].set_index("Product")
 
     return df_long, timepoints, product_to_ref, product_properties
+
+
+def load_data() -> tuple[pd.DataFrame, list[str], dict[str, str], pd.DataFrame]:
+    """
+    Load and reshape the Excel workbook. Cache is keyed on the workbook's
+    mtime so edits on the network drive are picked up without a manual reload.
+
+    Expected column layout (0-indexed):
+      0     : Product name
+      1–6   : Mean values at each timepoint
+      7–12  : Corresponding std deviations
+      13    : (unused / spacer)
+      14    : Reference / lot number
+      15–19 : Static material properties (STATIC_PROPERTIES)
+    """
+    return _load_data_cached(_workbook_mtime())
 
 
 # ---------------------------------------------------------------------------
@@ -1256,10 +1262,9 @@ def load_library_from_index(library_path: str) -> dict[str, list[dict]]:
     Fast library load using a two-level cache:
       1. st.session_state  — zero I/O on rerenders within the same session
       2. library_index.json on disk — one JSON read per session start
-      3. Full raw scan — only when no index exists yet or changes detected
+      3. Full raw scan — only when no index exists yet.
+    Incremental refresh is triggered manually via the Library tab's Sync button.
     """
-    import threading
-
     # ── Level 1: in-memory session cache ────────────────────────────────────
     if "library_cache" in st.session_state:
         return st.session_state["library_cache"]
@@ -1269,15 +1274,6 @@ def load_library_from_index(library_path: str) -> dict[str, list[dict]]:
     # ── Level 2: read existing index ────────────────────────────────────────
     if index_path.exists():
         index = _load_index_from_disk(library_path)
-
-        # Background thread: incrementally update only new/changed files
-        _index_snap = dict(index)
-        def _bg():
-            try:
-                updated = _build_index_from_scan(library_path)
-                st.session_state.pop("library_cache", None)
-            except Exception as _e:
-                print(f"Library index background update failed: {_e}")
 
     # ── Level 3: first run — build index now ────────────────────────────────
     else:
@@ -3650,6 +3646,7 @@ def render_comparator(
         if st.button("↻ Reload data", use_container_width=True,
                      help=f"Clear cache and reload from:\n{FILE_PATH}"):
             st.cache_data.clear()
+            st.session_state.pop("ai_data_context", None)
             st.rerun()
 
     st.divider()

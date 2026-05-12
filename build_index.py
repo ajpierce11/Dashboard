@@ -8,7 +8,9 @@ from pathlib import Path
 
 print("build_index.py starting...")
 
-LIBRARY_PATH = r"C:\Users\piercax\OneDrive - AbbVie Inc (O365)\Desktop 1\testpython\Library"
+sys.path.insert(0, str(Path(__file__).parent))
+from config import LIBRARY_PATH
+
 API_KEY = os.environ.get("ILIAD_API_KEY", "")
 
 print(f"API key set: {bool(API_KEY)}")
@@ -22,8 +24,6 @@ if not Path(LIBRARY_PATH).exists():
 index_path = Path(LIBRARY_PATH) / "library_index.json"
 if not index_path.exists():
     print("ERROR: library_index.json not found. Open the app first."); input(); sys.exit(1)
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 # ── Read index to get document list and metadata ──────────────────────────────
 print("\nReading library index...")

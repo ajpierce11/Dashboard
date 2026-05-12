@@ -293,7 +293,7 @@ class VectorStore:
 
         Returns list of {"title", "category", "text", "score"}.
         """
-        if not self._vectors is not None and len(self._vectors):
+        if self._vectors is None:
             if not self._load():
                 return []
 
@@ -365,6 +365,13 @@ class VectorStore:
             if len(top_bases) >= top_k:
                 break
 
+        # Build (entry_id, chunk_i) -> score_index lookup once so chunk-level
+        # scoring inside the merge loop is O(1) instead of O(N) per chunk.
+        chunk_idx: dict[tuple, int] = {
+            (m.get("entry_id"), m.get("chunk_i")): i
+            for i, m in enumerate(self._metadata)
+        }
+
         # Step 2: For each top base title, gather ALL chunks from ALL versions
         # by scanning the entire metadata list — this ensures Rev3 text is
         # included even if its chunks scored lower than _final's chunks
@@ -377,6 +384,10 @@ class VectorStore:
             if base in base_chunks:
                 base_chunks[base].append(meta)
                 base_scores[base] = max(base_scores[base], float(scores[idx]))
+
+        def _chunk_score(m: dict) -> float:
+            i = chunk_idx.get((m.get("entry_id"), m.get("chunk_i")))
+            return float(scores[i]) if i is not None else 0.0
 
         # Step 3: Build results — merge all version texts per base
         results: list[dict] = []
@@ -394,14 +405,8 @@ class VectorStore:
             seen_titles: set[str] = set()
             version_texts: list[str] = []
             for entry_id, entry_chunks in by_entry.items():
-                # Score each chunk individually, pick top 10, re-sort by position
+                # Score each chunk individually, pick top 20, re-sort by position
                 # so the most relevant sections are sent, not just the intro
-                def _chunk_score(m):
-                    for idx in range(len(self._metadata)):
-                        mm = self._metadata[idx]
-                        if mm.get("entry_id") == m.get("entry_id") and mm.get("chunk_i") == m.get("chunk_i"):
-                            return float(scores[idx])
-                    return 0.0
                 top_chunks = sorted(entry_chunks, key=_chunk_score, reverse=True)[:20]
                 top_chunks = sorted(top_chunks, key=lambda m: m.get("chunk_i", 0))
                 title = top_chunks[0]["title"]
@@ -411,10 +416,7 @@ class VectorStore:
                     version_texts.append(f"[{title}]:\n{combined}")
 
             merged = "\n\n".join(version_texts)
-            best_meta = max(chunks, key=lambda m: float(scores[
-                next((i for i in range(len(self._metadata))
-                      if self._metadata[i]["entry_id"] == m["entry_id"]), 0)
-            ]) if len(chunks) > 0 else chunks[0])
+            best_meta = max(chunks, key=_chunk_score)
 
             results.append({
                 "title":    best_meta["title"],

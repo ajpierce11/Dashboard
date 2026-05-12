@@ -1,0 +1,23 @@
+# Testing Dashboard (comparator.py) — top-level Streamlit app
+# Pin as needed. Versions below are reasonable recent minima.
+
+streamlit>=1.32
+pandas>=2.0
+numpy>=1.24
+plotly>=5.18
+scipy>=1.11
+openpyxl>=3.1          # .xlsx reader for pandas
+requests>=2.31
+urllib3>=2.0
+python-dotenv>=1.0     # optional: load .env for local dev
+
+# Document text extraction (doc_text.py)
+python-docx>=1.1
+pymupdf>=1.24          # PDF via fitz (preferred)
+pypdf>=4.0             # PDF fallback
+python-pptx>=0.6.23
+
+# NOTE: The Flask app in protocol_to_report/ has its own requirements.txt.
+# Install it separately:
+#   pip install -r protocol_to_report/requirements.txt
+#   python -m spacy download en_core_web_md

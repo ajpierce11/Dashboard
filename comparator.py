@@ -2236,9 +2236,11 @@ def _build_data_context(
     return "\n".join(lines)
 
 
-def _retrieve_library_context(question: str) -> str:
+def _retrieve_library_context(question: str) -> list[dict]:
     """
-    Retrieve relevant document text from the library index.
+    Keyword-only retrieval used as a fallback when the vector index is
+    absent or returns no hits. Returns the same shape as VectorStore.search
+    so the AI-Assistant pipeline can treat both sources uniformly.
 
     Scoring strategy:
       10 pts — exact study number/ID match in title (e.g. 1746-D52-070)
@@ -2246,28 +2248,23 @@ def _retrieve_library_context(question: str) -> str:
        3 pts — any question keyword (>3 chars) matches title
        1 pt  — any question keyword (>3 chars) matches preview text
 
-    When a specific study number is detected, return up to 2 documents
-    (the specific doc plus its closest neighbour).
-    When searching by product/keyword, return up to 8 documents so the
-    model has a comprehensive view of all related studies.
-
-    Each document is labelled with its exact title so the model can
-    only cite titles it was actually given.
+    When a specific study number is detected, return up to 3 documents.
+    Otherwise up to 8.
     """
     import json
     index_path = Path(LIBRARY_PATH) / "library_index.json"
     if not index_path.exists():
-        return ""
+        return []
 
     try:
         with open(index_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        return ""
+        return []
 
     entries = [e for e in data.get("entries", []) if not e.get("deleted")]
     if not entries:
-        return ""
+        return []
 
     q_lower   = question.lower()
     study_nums = re.findall(
@@ -2336,16 +2333,18 @@ def _retrieve_library_context(question: str) -> str:
             break
 
     if not deduped:
-        return ""
+        return []
 
-    lines = ["## Relevant Library Documents\n"]
+    results: list[dict] = []
     for score, entry in deduped:
-        cat     = entry.get("category", "")
-        title   = entry.get("display_name") or entry.get("title", "")
-        preview = entry.get("preview", "")
-        lines.append(f"### {title} [{cat}]\n{preview}\n")
-
-    return "\n".join(lines)
+        results.append({
+            "title":    entry.get("display_name") or entry.get("title", ""),
+            "category": entry.get("category", ""),
+            "text":     entry.get("preview", ""),
+            "score":    float(score),
+            "source":   "keyword",
+        })
+    return results
 
 
 # Per-document full-text cap when injecting exact-ID matches. Sized so a
@@ -3400,17 +3399,11 @@ def render_ai_assistant(
                         ft_titles = {c["title"] for c in fulltext_chunks}
                         chunks = [c for c in chunks if c["title"] not in ft_titles]
                     if not chunks and not fulltext_chunks:
-                        kw_ctx = _retrieve_library_context(question)
-                        if kw_ctx:
-                            chunks = [{"title": "Keyword search results",
-                                      "category": "", "text": kw_ctx}]
+                        chunks = _retrieve_library_context(question)
                     st.session_state["ai_last_doc_chunks"] = fulltext_chunks + chunks
                 else:
                     st.write("Vector index not built — falling back to keyword search…")
-                    chunks = []
-                    kw_ctx = _retrieve_library_context(question)
-                    if kw_ctx:
-                        chunks = [{"title": "Library", "category": "", "text": kw_ctx}]
+                    chunks = _retrieve_library_context(question)
                     st.session_state["ai_last_doc_chunks"] = fulltext_chunks + chunks
 
                 sections: list[str] = []

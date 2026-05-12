@@ -11,9 +11,8 @@ from scipy.stats import ttest_ind_from_stats, f_oneway, combine_pvalues
 import numpy as np
 from io import BytesIO
 import requests
-import urllib3
 from vector_store import VectorStore
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import iliad_client
 import os
 import re
 import json
@@ -25,6 +24,7 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 
 from config import FILE_PATH, LIBRARY_PATH
+from title_utils import base_title, clean_stem as _shared_clean_stem, display_title_from_filename
 
 STATIC_PROPERTIES = [
     "HA Concentration (mg/mL)",
@@ -1444,7 +1444,7 @@ def _apply_organize_plan(selections: dict[str, str]) -> tuple[int, list[str]]:
     needed. Returns (moves_applied, errors).
     """
     import shutil
-    lib_path = Path(LIBRARY_PATH)
+    lib_path = Path(LIBRARY_PATH).resolve()
     for cat in LIBRARY_CATEGORIES:
         (lib_path / cat).mkdir(exist_ok=True)
 
@@ -1453,7 +1453,16 @@ def _apply_organize_plan(selections: dict[str, str]) -> tuple[int, list[str]]:
     for src_str, dest_cat in selections.items():
         if dest_cat == "(skip)":
             continue
-        src = Path(src_str)
+        src = Path(src_str).resolve()
+        # Guard against path traversal: only move files that live under the
+        # library root. UI keys are the plan dict's own keys today, but an
+        # adversarial plan dict (or a future code path) could include paths
+        # pointing elsewhere on disk.
+        try:
+            src.relative_to(lib_path)
+        except ValueError:
+            errors.append(f"{src.name}: refusing to move file outside library root")
+            continue
         if not src.exists():
             continue
         dst = lib_path / dest_cat / src.name
@@ -1679,23 +1688,7 @@ def load_library(library_path: str) -> dict[str, list[dict]]:
     return load_library_from_index(library_path)
 
 
-def _clean_stem(stem: str) -> str:
-    """
-    Normalise a filename stem for similarity matching.
-    Strips ONLY version/revision markers so that "AB-001 Protocol Rev2"
-    and "AB-001 Protocol" clean to the same string and group together.
-    Type keywords (protocol, report, TM, WI) are intentionally preserved
-    so that "AB-001 Protocol" and "AB-001 Report" stay distinct.
-    """
-    s = stem.lower()
-    # Remove revision/version markers at end of string only
-    s = re.sub(r'[\s_\-]*(revision|rev)[\s_\-]*\d*[\s_\-]*$', '', s)
-    s = re.sub(r'[\s_\-]*v\d+(\.\d+)?[\s_\-]*$', '', s)
-    # Remove pure status suffixes that carry no document identity
-    s = re.sub(r'[\s_\-]*(final|draft|clean|signed|approved|amended|updated?)[\s_\-]*$', '', s)
-    # Normalise separators to space
-    s = re.sub(r'[\s_\-]+', ' ', s).strip()
-    return s
+_clean_stem = _shared_clean_stem
 
 def _extract_version(stem: str) -> tuple[int, int]:
     """
@@ -1757,10 +1750,21 @@ def group_documents(docs: list[dict]) -> list[dict]:
     def union(x, y):
         parent[find(x)] = find(y)
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            if _similarity(cleaned[i], cleaned[j]) >= THRESHOLD:
-                union(i, j)
+    # Block by first token (usually the study number) so SequenceMatcher only
+    # runs between plausible matches. For the full library scan this turns a
+    # several-thousand-comparison pass into at most a few hundred.
+    from collections import defaultdict as _dd
+    blocks: dict[str, list[int]] = _dd(list)
+    for i, s in enumerate(cleaned):
+        first = s.split(" ", 1)[0] if s else ""
+        blocks[first].append(i)
+
+    for idxs in blocks.values():
+        for a in range(len(idxs)):
+            for b in range(a + 1, len(idxs)):
+                i, j = idxs[a], idxs[b]
+                if _similarity(cleaned[i], cleaned[j]) >= THRESHOLD:
+                    union(i, j)
 
     # Collect groups
     from collections import defaultdict
@@ -1807,15 +1811,10 @@ def group_documents(docs: list[dict]) -> list[dict]:
         # Sort: older revisions first, within same revision PDF before Word
         file_entries.sort(key=lambda f: (tuple(f["ver_tuple"]), 0 if f["ext"] == ".pdf" else 1))
 
-        # Display title: use the cleaned stem of the file with the highest version,
-        # title-cased and with separators replaced by spaces
+        # Display title: use the filename of the latest revision with version
+        # suffixes stripped and separators normalised.
         latest = max(file_entries, key=lambda f: tuple(f["ver_tuple"]))
-        base_name = Path(latest["filename"]).stem
-        # Strip the version suffix from the display title
-        title = re.sub(
-            r'[\s_\-]*(revision|rev|r)[\s_\-]*\d*[\s_\-]*$', '',
-            base_name, flags=re.IGNORECASE
-        ).replace('_', ' ').replace('-', ' ').strip()
+        title = display_title_from_filename(latest["filename"])
 
         # Most recent modified date
         most_recent = max(f["modified"] for f in file_entries)
@@ -2171,8 +2170,6 @@ def render_library() -> None:
 # AI Assistant
 # ---------------------------------------------------------------------------
 
-ILIAD_URL  = "https://iliad-emerging-api.abbvienet.com/api/v1/chat/claude-4.5-sonnet"
-ILIAD_KEY  = os.environ.get("ILIAD_API_KEY", "")
 ILIAD_MAX_TOKENS = 8192  # upper bound on the model's reply length
 
 SYSTEM_PROMPT = """You are a scientific data assistant for AbbVie's soft tissue and material testing team. You have access to two sources of information:
@@ -2324,31 +2321,14 @@ def _retrieve_library_context(question: str) -> str:
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Deduplicate revisions: strip version markers from titles and keep only
-    # the highest-scoring entry per unique base document.
-    # e.g. "AGN-2021-TR-048 Rev2" and "AGN-2021-TR-048 Rev1" → keep Rev2 only.
-    def _base_title(title: str) -> str:
-        """Strip version/status suffixes repeatedly to handle combos like _final - signed."""
-        t = title.strip()
-        suffixes = (
-            r"[\s_\-]*(revision|rev)[\s_\-]*\d*",
-            r"[\s_\-]*v\d+(\.\d+)?",
-            r"[\s_\-]*(final|draft|clean|signed|approved|amended)",
-            r"[\s_\-]*\(.*?\)",
-        )
-        for _ in range(5):
-            prev = t
-            for pattern in suffixes:
-                t = re.sub(pattern + r"[\s_\-]*$", "", t, flags=re.IGNORECASE).strip()
-            if t == prev:
-                break
-        return t.lower()
-
+    # Deduplicate revisions: keep only the highest-scoring entry per unique
+    # base document. e.g. "AGN-2021-TR-048 Rev2" and "AGN-2021-TR-048 Rev1"
+    # collapse to a single entry.
     seen_bases: set[str] = set()
     deduped = []
     for score, entry in scored:
         raw_title = entry.get("display_name") or entry.get("title", "")
-        base = _base_title(raw_title)
+        base = base_title(raw_title)
         if base not in seen_bases:
             seen_bases.add(base)
             deduped.append((score, entry))
@@ -2374,29 +2354,29 @@ def _retrieve_library_context(question: str) -> str:
 STUDY_FULLTEXT_CHAR_CAP = 70000
 
 # Total character budget for the assembled user message (library context +
-# product data + question). ~600k chars ≈ 150k tokens, leaving ~50k tokens
-# for system prompt, conversation history, and the model's 8k-token reply.
+# product data + question). claude-4.5-sonnet has a 200k token window;
+# ~600k chars ≈ 150k tokens, leaving ~50k tokens for the system prompt,
+# conversation history, and the model's 8k-token reply.
 USER_MSG_CHAR_BUDGET = 600000
+
+
+@st.cache_resource(show_spinner=False, max_entries=64)
+def _cached_extract_text_impl(filepath: str, mtime: float) -> str:
+    from doc_text import extract_text
+    return extract_text(filepath)
 
 
 def _cached_extract_text(filepath: str) -> str:
     """
-    Thread-safe session cache for expensive PDF/DOCX parsing. Keyed by
-    (filepath, mtime) so edits invalidate automatically. Avoids re-parsing
-    the same 5MB PDF each time a study is re-queried in the same session.
+    Module-level cache (bounded to 64 entries) for expensive PDF/DOCX parsing,
+    keyed by (filepath, mtime). Avoids storing extracted text in session_state,
+    which Streamlit pickles on every rerun and would grow unbounded.
     """
-    from doc_text import extract_text
-    cache = st.session_state.setdefault("_fulltext_cache", {})
     try:
         mtime = Path(filepath).stat().st_mtime
     except OSError:
         return ""
-    key = (filepath, mtime)
-    if key in cache:
-        return cache[key]
-    text = extract_text(filepath)
-    cache[key] = text
-    return text
+    return _cached_extract_text_impl(filepath, mtime)
 
 
 def _retrieve_study_fulltext(question: str) -> list[dict]:
@@ -2514,20 +2494,15 @@ def _stream_iliad(
     (e.g. the Report Generator, where 16k+ output tokens take several
     minutes to stream).
     """
-    if not ILIAD_KEY:
+    if not iliad_client.get_api_key():
         yield "⚠️ ILIAD_API_KEY environment variable is not set. Please set it and restart the app."
         return
 
     effective_max = max_tokens or ILIAD_MAX_TOKENS
 
     try:
-        resp = requests.post(
-            ILIAD_URL,
-            json={"messages": messages, "max_tokens": effective_max, "stream": True},
-            headers={"x-api-key": ILIAD_KEY, "Accept": "text/event-stream"},
-            timeout=timeout,
-            stream=True,
-            verify=False,
+        resp = iliad_client.post_chat(
+            messages, max_tokens=effective_max, stream=True, timeout=timeout
         )
         resp.raise_for_status()
         resp.encoding = "utf-8"
@@ -2608,12 +2583,11 @@ def _call_iliad_nonstreaming(
 ):
     """Single-shot request used as a streaming fallback. Yields one string."""
     try:
-        resp = requests.post(
-            ILIAD_URL,
-            json={"messages": messages, "max_tokens": max_tokens or ILIAD_MAX_TOKENS},
-            headers={"x-api-key": ILIAD_KEY},
+        resp = iliad_client.post_chat(
+            messages,
+            max_tokens=max_tokens or ILIAD_MAX_TOKENS,
+            stream=False,
             timeout=timeout,
-            verify=False,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -2897,7 +2871,7 @@ def render_report_generator() -> None:
         "from your document library."
     )
 
-    if not ILIAD_KEY:
+    if not iliad_client.get_api_key():
         st.error("ILIAD_API_KEY not set — this tab needs the LLM to generate reports.")
         return
 
@@ -3230,7 +3204,7 @@ def render_ai_assistant(
     # ── Chat history ─────────────────────────────────────────────────────────
     # Initialise vector store (one per session)
     if "ai_vector_store" not in st.session_state:
-        vs = VectorStore(LIBRARY_PATH, ILIAD_KEY)
+        vs = VectorStore(LIBRARY_PATH, iliad_client.get_api_key())
         if vs._load():
             st.session_state["ai_vector_store"] = vs
         else:
@@ -3246,7 +3220,7 @@ def render_ai_assistant(
         "Context from the dataset and relevant documents is automatically included."
     )
 
-    if not ILIAD_KEY:
+    if not iliad_client.get_api_key():
         st.error(
             "**ILIAD_API_KEY not found.**  \n"
             "Set the environment variable before starting the app:  \n"
@@ -3284,8 +3258,8 @@ def render_ai_assistant(
         with col_update:
             update_label = "⚡ Update index (new files only)" if vs_built else "⚡ Build document index"
             if st.button(update_label, use_container_width=True, key="ai_update_vs",
-                         disabled=not ILIAD_KEY):
-                new_vs = VectorStore(LIBRARY_PATH, ILIAD_KEY)
+                         disabled=not iliad_client.get_api_key()):
+                new_vs = VectorStore(LIBRARY_PATH, iliad_client.get_api_key())
                 if vs_built:
                     new_vs._load()
                 progress = st.progress(0, text="Starting…")
@@ -3314,9 +3288,9 @@ def render_ai_assistant(
         with col_full:
             if vs_built:
                 if st.button("🔄 Full rebuild", use_container_width=True, key="ai_build_vs",
-                             disabled=not ILIAD_KEY,
+                             disabled=not iliad_client.get_api_key(),
                              help="Re-embed everything from scratch. Use if document content has changed."):
-                    new_vs = VectorStore(LIBRARY_PATH, ILIAD_KEY)
+                    new_vs = VectorStore(LIBRARY_PATH, iliad_client.get_api_key())
                     progress = st.progress(0, text="Starting…")
                     def _cb2(done, total, msg):
                         pct = int(done / max(total, 1) * 100)
@@ -3386,11 +3360,13 @@ def render_ai_assistant(
                 # ── Semantic document retrieval ───────────────────────────────
                 vs_instance: VectorStore | None = st.session_state.get("ai_vector_store")
 
-                # Detect follow-up questions referencing the previous document
+                # Detect follow-up questions referencing the previous document.
+                # Bare "it"/"its" were intentionally dropped — they matched too
+                # many false positives like "is it ok" / "what time is it".
                 followup_signals = {
                     "same study", "same report", "same document", "that study",
                     "that report", "that document", "this study", "this report",
-                    "the study", "the report", "the document", "it ", "its ",
+                    "the study", "the report", "the document",
                 }
                 is_followup = any(sig in question.lower() for sig in followup_signals)
                 has_study_num = bool(

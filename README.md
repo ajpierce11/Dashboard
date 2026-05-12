@@ -99,7 +99,8 @@ You can also use the "Build index" button in the AI Assistant tab.
 .
 ├── comparator.py           # Streamlit dashboard (main entry point)
 ├── config.py               # Env-driven path config
-├── library_index.py        # Metadata index layer
+├── iliad_client.py         # Shared ILIAD gateway client (chat + embeddings)
+├── title_utils.py          # Shared document-title normalisation helpers
 ├── vector_store.py         # Embedding + semantic search layer
 ├── doc_text.py             # Text extraction (pdf/docx/pptx)
 ├── build_index.py          # Standalone incremental vector index builder

@@ -14,18 +14,13 @@ Usage:
 """
 
 import json
-import os
-import re
-import time
 from pathlib import Path
 
 import numpy as np
-import requests
-import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import iliad_client
+from title_utils import base_title
 
-EMBED_URL   = "https://iliad-emerging-api.abbvienet.com/api/v1/embed/text-embedding-3-small"
 EMBED_DIM   = 1536
 CHUNK_SIZE  = 1200    # characters per chunk
 CHUNK_OVERLAP = 150  # overlap between chunks to preserve context
@@ -73,48 +68,8 @@ def _chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP)
 # ---------------------------------------------------------------------------
 
 def _embed_batch(texts: list[str], api_key: str) -> list[list[float]]:
-    """
-    Call the ILIAD embeddings endpoint for a batch of texts.
-    Returns a list of embedding vectors (one per input text).
-    """
-    if not texts:
-        return []
-
-    for attempt in range(4):
-        try:
-            resp = requests.post(
-                EMBED_URL,
-                json={"input": texts},
-                headers={"x-api-key": api_key},
-                timeout=30,  # 30s per batch — prevents hanging on large documents
-                verify=False,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            # ILIAD format: {"embeddings": [[...], [...]]}
-            if "embeddings" in data:
-                return data["embeddings"]
-            # OpenAI-compatible format
-            if "data" in data:
-                return [item["embedding"] for item in data["data"]]
-            # Flat list
-            if isinstance(data, list):
-                return data
-            raise ValueError(f"Unexpected response shape: {list(data.keys())}")
-
-        except requests.exceptions.Timeout:
-            if attempt < 3:
-                time.sleep(2 ** attempt)
-            else:
-                raise
-        except Exception:
-            if attempt < 3:
-                time.sleep(2 ** attempt)
-            else:
-                raise
-
-    return []
+    """Thin wrapper around iliad_client.embed kept for backwards-compat callers."""
+    return iliad_client.embed(texts, api_key=api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -321,31 +276,10 @@ class VectorStore:
         # lower-ranked chunks from revision versions of top documents
         ranked = np.argsort(scores)[::-1]
 
-        import re as _re
         from collections import defaultdict as _dd
 
-        # Study-number prefix (e.g. "1745-D76-054"). Including it in the
-        # base key prevents two distinct studies whose tails happen to match
-        # after suffix stripping from being collapsed into one result.
-        _study_num_re = _re.compile(r"\b([A-Za-z0-9]+-[A-Za-z0-9]+-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\b")
-
         def _base(title: str) -> str:
-            t = title.strip()
-            m = _study_num_re.search(t)
-            prefix = m.group(1).lower() if m else ""
-            suffixes = (
-                r"[\s_\-]*(revision|rev)[\s_\-]*\d*",
-                r"[\s_\-]*v\d+(\.\d+)?",
-                r"[\s_\-]*(final|draft|clean|signed|approved|amended)",
-                r"[\s_\-]*\(.*?\)",
-            )
-            for _ in range(5):
-                prev = t
-                for pattern in suffixes:
-                    t = _re.sub(pattern + r"[\s_\-]*$", "", t, flags=_re.IGNORECASE).strip()
-                if t == prev:
-                    break
-            return f"{prefix}|{t.lower()}"
+            return base_title(title, include_study_prefix=True)
 
         # Step 1: Find top-k unique base titles from highest-scoring chunks
         # Use a minimum score threshold so documents mentioned only in body

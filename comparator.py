@@ -2093,6 +2093,20 @@ def _highlight(text: str, needle: str) -> str:
     )
 
 
+def _entry_id_for_group(group: dict) -> str:
+    """
+    Produce a stable id for a card so bookmarks survive reruns.
+    Mirrors how the library index generates entry_ids.
+    """
+    files = group.get("files", [])
+    if files:
+        fp = Path(files[0].get("filepath", ""))
+        if group.get("has_versions") or len(files) > 1:
+            return fp.parent.name or group.get("title", "")
+        return f"{fp.stem}_{fp.suffix.lstrip('.')}"
+    return group.get("title", "").replace(" ", "_")[:60]
+
+
 def render_doc_card(group: dict, card_key: str, search: str = "") -> None:
     """
     Render one document card.
@@ -2109,8 +2123,13 @@ def render_doc_card(group: dict, card_key: str, search: str = "") -> None:
     has_versions     = group["has_versions"]
     n_versions       = len({tuple(f["ver_tuple"]) for f in group["files"]}) if has_versions else 0
 
+    entry_id = _entry_id_for_group(group)
+    is_bookmarked = entry_id in _get_bookmarks()
+
     with st.container(border=True):
-        # ── Title row ────────────────────────────────────────────────────
+        # Build the title markdown once, then place the star toggle and
+        # the title in a two-column row so the star sits left of the text
+        # without shifting the revisions/New badges that follow.
         display_title = _highlight(group["title"], search) if search else group["title"]
         title_md = f"**{display_title}**" if not search else f"<strong>{display_title}</strong>"
         if has_versions:
@@ -2129,7 +2148,16 @@ def render_doc_card(group: dict, card_key: str, search: str = "") -> None:
                 f"background:#A6B5E0;color:#071D49;padding:2px 7px;"
                 f"border-radius:10px;font-weight:600'>✨ New</span>"
             )
-        st.markdown(title_md, unsafe_allow_html=True)
+
+        star_col, title_col = st.columns([1, 12], vertical_alignment="center")
+        with star_col:
+            star_icon = "⭐" if is_bookmarked else "☆"
+            if st.button(star_icon, key=f"{card_key}_star",
+                         help="Bookmark (stored per-user on the share)"):
+                _toggle_bookmark(entry_id)
+                st.rerun()
+        with title_col:
+            st.markdown(title_md, unsafe_allow_html=True)
         st.caption(f"📅 {group['modified']}")
 
         # ── Preview ──────────────────────────────────────────────────────
@@ -4349,6 +4377,100 @@ def main() -> None:
         render_report_generator()
 
 
+# ---------------------------------------------------------------------------
+# Per-user bookmarks
+# ---------------------------------------------------------------------------
+
+def _user_prefs_path(username: str) -> Path:
+    """
+    Per-user preferences file on the shared drive. Stored under
+    Library/.user_prefs/<username>.json — so bookmarks follow the user
+    across sessions and machines, not just the current browser tab.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", username)[:40] or "anonymous"
+    return Path(LIBRARY_PATH) / ".user_prefs" / f"{safe}.json"
+
+
+def _load_user_prefs() -> dict:
+    """Load the current user's prefs JSON. Returns an empty shell on any failure."""
+    user = auth.current_user() or "anonymous"
+    path = _user_prefs_path(user)
+    if not path.exists():
+        return {"bookmarks": []}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"bookmarks": []}
+        data.setdefault("bookmarks", [])
+        return data
+    except Exception:
+        return {"bookmarks": []}
+
+
+def _save_user_prefs(prefs: dict) -> None:
+    user = auth.current_user() or "anonymous"
+    path = _user_prefs_path(user)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write so a crash mid-save doesn't leave a truncated
+        # prefs file that the next load silently replaces with defaults.
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, indent=2)
+        os.replace(str(tmp), str(path))
+    except OSError:
+        pass  # best-effort — bookmarks are cosmetic, not load-bearing
+
+
+def _get_bookmarks() -> set[str]:
+    return set(_load_user_prefs().get("bookmarks", []))
+
+
+def _toggle_bookmark(entry_id: str) -> bool:
+    """Add or remove an entry from bookmarks. Returns True if now bookmarked."""
+    prefs = _load_user_prefs()
+    marks = set(prefs.get("bookmarks", []))
+    if entry_id in marks:
+        marks.discard(entry_id)
+        now_marked = False
+    else:
+        marks.add(entry_id)
+        now_marked = True
+    prefs["bookmarks"] = sorted(marks)
+    _save_user_prefs(prefs)
+    return now_marked
+
+
+def _bookmarked_entries() -> list[dict]:
+    """Library entries the current user has bookmarked, in bookmark order."""
+    marks = _get_bookmarks()
+    if not marks:
+        return []
+    index_path = Path(LIBRARY_PATH) / "library_index.json"
+    if not index_path.exists():
+        return []
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            entries = json.load(f).get("entries", [])
+    except Exception:
+        return []
+    # Keep rendering stable — show in alphabetical order by title.
+    by_id = {e.get("id", ""): e for e in entries if not e.get("deleted")}
+    out = []
+    for eid in sorted(marks):
+        e = by_id.get(eid)
+        if e is None:
+            continue
+        out.append({
+            "title": e.get("display_name") or e.get("title", ""),
+            "category": e.get("category", ""),
+            "entry_id": eid,
+        })
+    out.sort(key=lambda r: r["title"].lower())
+    return out
+
+
 def _recent_library_entries(days: int = 14, limit: int = 10) -> list[dict]:
     """
     Return library entries whose most recent file mtime is within the last
@@ -4415,6 +4537,26 @@ def render_home(
     col_left, col_right = st.columns([3, 2], gap="large")
 
     with col_left:
+        # Bookmarks first — this is "things I personally flagged to come
+        # back to", the most direct signal a teammate cares about.
+        bookmarks = _bookmarked_entries()
+        st.markdown("#### ⭐ Your bookmarks")
+        if not bookmarks:
+            st.caption(
+                "Star any document in the **Document Library** tab to pin "
+                "it here. Stored per-user on the shared drive so your "
+                "bookmarks follow you across machines."
+            )
+        else:
+            for b in bookmarks:
+                icon = CATEGORY_ICONS.get(b["category"], "📄")
+                st.markdown(
+                    f"- {icon} **{b['title']}** "
+                    f"<span style='color:#A6B5E0;font-size:12px'>"
+                    f"_{b['category']}_</span>",
+                    unsafe_allow_html=True,
+                )
+
         st.markdown("#### 🗂 Recently added to Library")
         recent = _recent_library_entries(days=14, limit=10)
         if not recent:

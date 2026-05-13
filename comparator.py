@@ -27,6 +27,7 @@ from config import FILE_PATH, LIBRARY_PATH
 from title_utils import base_title, clean_stem as _shared_clean_stem, display_title_from_filename
 import auth
 import ai_metadata
+import insights
 
 STATIC_PROPERTIES = [
     "HA Concentration (mg/mL)",
@@ -4427,11 +4428,12 @@ def main() -> None:
         with status_col:
             _render_user_status_badge()
 
-    tab_home, tab_comparator, tab_library, tab_ai, tab_report = st.tabs([
+    tab_home, tab_comparator, tab_library, tab_ai, tab_insights, tab_report = st.tabs([
         "🏠 Home",
         "📈 Product Comparator",
         "📚 Document Library",
         "🤖 AI Assistant",
+        "🔬 Insights",
         "📝 Report Generator",
     ])
 
@@ -4446,6 +4448,9 @@ def main() -> None:
 
     with tab_ai:
         render_ai_assistant(df, timepoints, product_to_ref, product_properties)
+
+    with tab_insights:
+        render_insights()
 
     with tab_report:
         render_report_generator()
@@ -4765,6 +4770,99 @@ def _render_coverage_matrix() -> None:
             for m in meta.values() if m.get("ok", False)
         ])
         st.dataframe(sample, use_container_width=True, height=300)
+
+
+def render_insights() -> None:
+    """
+    Analytical views over the AI-extracted metadata cache. Everything
+    here is deterministic — no LLM calls — so it's cheap to browse
+    and reproducible across sessions.
+    """
+    st.subheader("🔬 Insights")
+    st.caption(
+        "Views across every study with extracted metadata. Numbers "
+        "come from the AI-metadata cache on the share. If something "
+        "looks off, run **🧠 Refresh AI metadata** on the Home tab."
+    )
+
+    meta = ai_metadata.load_entries_keyed(LIBRARY_PATH)
+    rows = insights.flatten(meta)
+
+    if not rows:
+        st.info(
+            "No AI metadata available yet. Go to the **🏠 Home** tab "
+            "and click **🧠 Refresh AI metadata** to build the cache."
+        )
+        return
+
+    # ── Gap analysis ─────────────────────────────────────────────────────
+    st.markdown("### 📉 Coverage gaps")
+    st.caption(
+        "Products that have been studied in at least 2 models but have "
+        "zero studies in another — candidate experiments to run. "
+        "Sorted by how well-studied the product is overall, so gaps in "
+        "your most-tested products bubble to the top."
+    )
+    gaps = insights.find_gaps(rows, min_same_product_other_models=2)
+    if not gaps:
+        st.caption(
+            "_No obvious gaps — either every product is tested in every "
+            "model we know about, or there isn't enough coverage yet to "
+            "tell. Run more studies and come back._"
+        )
+    else:
+        st.caption(f"Showing top {min(20, len(gaps))} of {len(gaps)} gaps.")
+        gaps_df = pd.DataFrame([
+            {
+                "Product":            g["product"],
+                "Missing model":      g["missing_model"],
+                "Tested in":          ", ".join(g["covered_models"]),
+                "Total studies":      g["total_studies"],
+            }
+            for g in gaps[:20]
+        ])
+        st.dataframe(gaps_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Methodology navigator ────────────────────────────────────────────
+    st.markdown("### 🔬 Methodology navigator")
+    st.caption(
+        "Every endpoint measured across the library, with the studies "
+        "that measured it. Use this to find prior methodology when "
+        "designing a new study."
+    )
+
+    summary = insights.endpoint_summary_table(rows)
+    if summary.empty:
+        st.caption("No endpoints extracted yet.")
+    else:
+        search = st.text_input(
+            "🔍 Filter endpoints",
+            placeholder="e.g. collagen, elasticity, water uptake",
+            key="insights_endpoint_search",
+            label_visibility="collapsed",
+        ).strip().lower()
+
+        shown = summary
+        if search:
+            shown = summary[summary["Endpoint"].str.lower().str.contains(search, na=False)]
+
+        st.dataframe(shown, use_container_width=True, hide_index=True, height=260)
+
+        # Detail view — pick one endpoint and see every study that used it.
+        endpoint_pick = st.selectbox(
+            "Show studies for:",
+            options=[""] + list(shown["Endpoint"]),
+            key="insights_endpoint_pick",
+        )
+        if endpoint_pick:
+            detail = insights.studies_for_endpoint(rows, endpoint_pick)
+            if not detail.empty:
+                st.caption(
+                    f"**{len(detail)} study row(s)** measured _{endpoint_pick}_:"
+                )
+                st.dataframe(detail, use_container_width=True, hide_index=True)
 
 
 def render_home(

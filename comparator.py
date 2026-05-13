@@ -3860,8 +3860,8 @@ def main() -> None:
     # Resolve logo paths relative to this file so it works regardless of
     # where the user launches streamlit from.
     _here = Path(__file__).resolve().parent
-    _logo_path = _here / "assets" / "AbbVieLogo_AbbVie dark blue.png"
-    _favicon_path = _here / "assets" / "AbbVie-favicon-white-background-400x400.png"
+    _logo_path = _here / "Assets" / "AbbVieLogo_AbbVie dark blue.png"
+    _favicon_path = _here / "Assets" / "AbbVie-favicon-white-background-400x400.png"
 
     st.set_page_config(
         page_title="AbbVie Testing Dashboard",

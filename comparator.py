@@ -4641,6 +4641,45 @@ def _refresh_ai_metadata() -> None:
     )
 
 
+def _render_extraction_diagnostics() -> None:
+    """
+    When extraction has failures, summarise them so the admin can see
+    the pattern instead of hunting through 500 JSON records. Grouped
+    by error message with counts and a few example titles.
+    """
+    meta = ai_metadata.load_entries_keyed(LIBRARY_PATH)
+    if not meta:
+        return
+    failures = [m for m in meta.values() if not m.get("ok", False)]
+    if not failures:
+        return
+
+    with st.expander(
+        f"⚠️ {len(failures)} extraction failure(s) — click to diagnose",
+        expanded=True,
+    ):
+        # Bucket by error message
+        from collections import defaultdict
+        buckets: dict[str, list[dict]] = defaultdict(list)
+        for rec in failures:
+            err = rec.get("error", "unknown")
+            # Trim the error so near-identical messages group together.
+            # e.g. "HTTPError: 429 Too Many Requests..." vs "HTTPError: 429 ..."
+            short = err[:120]
+            buckets[short].append(rec)
+
+        for err, recs in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
+            st.markdown(f"**{len(recs)} failure(s):** `{err}`")
+            # Show first three entry_ids to spot any pattern
+            sample = ", ".join(r.get("entry_id", "")[:40] for r in recs[:3])
+            st.caption(f"Examples: {sample}")
+
+        st.caption(
+            "Copy the top error line back to chat — it determines the fix "
+            "(rate limit, timeout, response parse, etc.)."
+        )
+
+
 def _render_coverage_matrix() -> None:
     """
     Products × models heatmap derived from the AI metadata cache.
@@ -4828,6 +4867,7 @@ def render_home(
         )
 
     st.divider()
+    _render_extraction_diagnostics()
     _render_coverage_matrix()
 
 

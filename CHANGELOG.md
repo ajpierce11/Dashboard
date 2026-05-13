@@ -2,6 +2,19 @@
 
 Notable changes to the Testing Dashboard. Newest at top. Versioning is date-based since there's no semver published.
 
+## 2026-05-13 (latest)
+
+### Added
+- **Sidebar** with at-a-glance status — signed-in user + role (admin/viewer), data freshness (workbook, library index, vector index last-updated), and AI connection status.
+- **"New" badge** (✨) on library doc cards whose most recent file is within the last 7 days. Makes fresh material visually obvious.
+- **Search-match highlighting** — library search now visually highlights the matched substring in each card title.
+- **"Copy raw text" expander** under each AI Assistant message — uses `st.code`'s built-in clipboard button so users can paste answers into email/reports as markdown.
+- **Workbook freshness** shown inline in the header caption ("workbook updated 3h ago").
+
+### Changed
+- Stats computations (`run_pairwise_ttests`, `run_anova`, `run_fisher_overall`) now cached with `@st.cache_data` — reruns with identical selection skip the scipy work.
+- Excel export is no longer built on every rerun — there's a **Prepare Excel download** button that builds on demand, then the download button appears. Main browse flow stays responsive after selection changes.
+
 ## 2026-05-13 (even later)
 
 ### Changed

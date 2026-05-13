@@ -1931,7 +1931,26 @@ def _render_file_row(f: dict, key: str, show_name: bool = True) -> None:
         _download_btn(f, key=key)
 
 
-def render_doc_card(group: dict, card_key: str) -> None:
+def _highlight(text: str, needle: str) -> str:
+    """
+    Wrap case-insensitive occurrences of `needle` in `text` with a brand
+    Medium-Blue background span. Used to make library search matches pop
+    in the card titles and file rows. Returns the original text unchanged
+    when the needle is empty.
+    """
+    if not needle or not text:
+        return text
+    pattern = re.compile(re.escape(needle), re.IGNORECASE)
+    return pattern.sub(
+        lambda m: (
+            f"<mark style='background:#A6B5E0;color:#071D49;"
+            f"padding:0 2px;border-radius:2px'>{m.group(0)}</mark>"
+        ),
+        text,
+    )
+
+
+def render_doc_card(group: dict, card_key: str, search: str = "") -> None:
     """
     Render one document card.
 
@@ -1949,7 +1968,8 @@ def render_doc_card(group: dict, card_key: str) -> None:
 
     with st.container(border=True):
         # ── Title row ────────────────────────────────────────────────────
-        title_md = f"**{group['title']}**"
+        display_title = _highlight(group["title"], search) if search else group["title"]
+        title_md = f"**{display_title}**" if not search else f"<strong>{display_title}</strong>"
         if has_versions:
             title_md += (
                 f" &nbsp;<span style='font-size:11px;"
@@ -2238,7 +2258,7 @@ def render_library() -> None:
             for gi, group in enumerate(groups):
                 col = col_a if gi % 2 == 0 else col_b
                 with col:
-                    render_doc_card(group, card_key=f"{cat_key}_{gi}")
+                    render_doc_card(group, card_key=f"{cat_key}_{gi}", search=search_lower)
 
 
 
@@ -3630,8 +3650,13 @@ def render_ai_assistant(
     for msg in st.session_state["ai_messages"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            if msg["role"] == "assistant" and msg.get("sources"):
-                _render_sources(msg["sources"])
+            if msg["role"] == "assistant":
+                if msg.get("sources"):
+                    _render_sources(msg["sources"])
+                # "Copy raw" expander — st.code has a built-in clipboard
+                # button, and wrapping in an expander keeps it unobtrusive.
+                with st.expander("📋 Copy raw text", expanded=False):
+                    st.code(msg["content"], language="markdown")
 
     # ── Starter prompts (empty state) ────────────────────────────────────────
     if not st.session_state["ai_messages"]:

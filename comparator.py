@@ -4015,75 +4015,27 @@ def _workbook_freshness_caption() -> str:
         return "workbook: unknown"
 
 
-def _render_app_sidebar() -> None:
+def _render_user_status_badge() -> None:
     """
-    Left-hand sidebar with at-a-glance context: who's signed in, whether
-    they can make library changes, how fresh the data is, and whether
-    the AI backend is reachable. Kept compact — one short line per fact.
+    Compact top-right badge showing the current user and whether the AI
+    backend is reachable. Replaces the left sidebar — every teammate
+    wanted the space back, and user/AI status was the only part of the
+    sidebar worth keeping always-visible.
     """
-    with st.sidebar:
-        st.markdown("### 🧪 AbbVie Testing Dashboard")
-
-        # Who
-        user = auth.current_user() or "unknown"
-        role = "admin" if auth.is_admin() else "viewer"
-        badge = "🛠" if role == "admin" else "👤"
-        st.markdown(f"{badge} **{user}** · _{role}_")
-        if role == "viewer":
-            st.caption(f"Ask {auth.admin_contact()} to sync the library or rebuild the index.")
-
-        st.divider()
-
-        # Data freshness
-        st.markdown("**Data**")
-        try:
-            mtime = Path(FILE_PATH).stat().st_mtime
-            st.caption(f"📊 Workbook · {_format_relative(datetime.fromtimestamp(mtime))}")
-        except OSError:
-            st.caption("📊 Workbook · not found")
-
-        index_path = Path(LIBRARY_PATH) / "library_index.json"
-        if index_path.exists():
-            try:
-                with open(index_path, "r", encoding="utf-8") as f:
-                    last_updated = json.load(f).get("last_updated", "")
-                if last_updated:
-                    try:
-                        lu = datetime.fromisoformat(last_updated)
-                        st.caption(f"📚 Library index · {_format_relative(lu)}")
-                    except ValueError:
-                        st.caption(f"📚 Library index · {last_updated}")
-                else:
-                    st.caption("📚 Library index · present")
-            except Exception:
-                st.caption("📚 Library index · unreadable")
-        else:
-            st.caption("📚 Library index · not built")
-
-        vector_file = Path(LIBRARY_PATH) / "library_vectors.npz"
-        if vector_file.exists():
-            try:
-                vt = datetime.fromtimestamp(vector_file.stat().st_mtime)
-                st.caption(f"🧠 Vector index · {_format_relative(vt)}")
-            except OSError:
-                st.caption("🧠 Vector index · present")
-        else:
-            st.caption("🧠 Vector index · not built")
-
-        st.divider()
-
-        # AI status
-        if iliad_client.get_api_key():
-            st.markdown("**AI** · 🟢 connected")
-        else:
-            st.markdown("**AI** · 🔴 no API key")
-            st.caption("Set `ILIAD_API_KEY` and restart.")
-
-        st.divider()
-        st.caption(
-            "[Repo](https://github.com/ajpierce11/Dashboard) · "
-            "[CHANGELOG](https://github.com/ajpierce11/Dashboard/blob/main/CHANGELOG.md)"
-        )
+    user = auth.current_user() or "unknown"
+    role = "admin" if auth.is_admin() else "viewer"
+    user_icon = "🛠" if role == "admin" else "👤"
+    ai_ok = bool(iliad_client.get_api_key())
+    ai_dot = "🟢" if ai_ok else "🔴"
+    ai_label = "AI connected" if ai_ok else "AI offline"
+    st.markdown(
+        f"<div style='text-align:right;font-size:12px;color:#A6B5E0;"
+        f"margin-top:0.25rem'>"
+        f"{user_icon} {user} · <em>{role}</em>"
+        f" &nbsp;·&nbsp; {ai_dot} {ai_label}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4132,15 +4084,9 @@ def main() -> None:
             footer { visibility: hidden; }
             [data-testid="stCaptionContainer"] { margin-top: -0.25rem; color: #A6B5E0; }
 
-            /* Sidebar narrower than the 336px default — the content is
-               short labels, no need to eat that much horizontal space. */
-            section[data-testid="stSidebar"] {
-                width: 240px !important;
-                min-width: 240px !important;
-            }
-            section[data-testid="stSidebar"] > div {
-                width: 240px !important;
-            }
+            /* No sidebar — hide Streamlit's reserved slot so main content
+               gets the full width. */
+            section[data-testid="stSidebar"] { display: none !important; }
 
             /* Clean system font stack — avoids the default Streamlit
                Source Sans that teammates recognise as "the Streamlit look". */
@@ -4243,29 +4189,32 @@ def main() -> None:
 
     products = sorted(df["Product"].unique().tolist())
 
-    # ── Sidebar: who / what / when ──────────────────────────────────────────
-    # Gives every teammate a glanceable "is this data fresh, am I admin"
-    # panel without cluttering the main area.
-    _render_app_sidebar()
-
-    # Header: logo on the left, title + caption on the right. If the logo
-    # file is missing, fall back to a title-only header so the app still
-    # runs in environments that don't have the assets folder.
+    # Header: logo on the left, title + caption in the middle, compact
+    # user + AI status chip on the right. Fall back to a title-only
+    # header if the logo asset is missing.
     _workbook_caption = _workbook_freshness_caption()
     _header_caption = (
         f"**{len(products)}** products · **{len(timepoints)}** timepoints · "
         f"data source: `{Path(FILE_PATH).name}` · {_workbook_caption}"
     )
     if _logo_path.exists():
-        logo_col, title_col = st.columns([1, 9], gap="medium", vertical_alignment="center")
+        logo_col, title_col, status_col = st.columns(
+            [1, 7, 2.5], gap="medium", vertical_alignment="center"
+        )
         with logo_col:
             st.image(str(_logo_path), width=110)
         with title_col:
             st.title("Testing Dashboard")
             st.caption(_header_caption)
+        with status_col:
+            _render_user_status_badge()
     else:
-        st.title("AbbVie – Testing Dashboard")
-        st.caption(_header_caption)
+        title_col, status_col = st.columns([8, 2.5], vertical_alignment="center")
+        with title_col:
+            st.title("AbbVie – Testing Dashboard")
+            st.caption(_header_caption)
+        with status_col:
+            _render_user_status_badge()
 
     tab_comparator, tab_library, tab_ai, tab_report = st.tabs([
         "📈 Product Comparator",

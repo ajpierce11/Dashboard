@@ -5,6 +5,7 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 ## 2026-05-13 (latest)
 
 ### Changed
+- **Removed the left sidebar.** It was eating horizontal space for info most users didn't need at a glance. The two pieces worth always-visible — signed-in user + AI connection status — moved to a compact top-right chip in the header row.
 - **Library Sync now also updates the AI vector index in one pass.** Previously admins had to click Sync in the Library tab *and* Update index in the AI Assistant tab separately, and forgetting the second step meant new docs were browsable but invisible to semantic search. A single Sync click now does both.
 
 ### Added

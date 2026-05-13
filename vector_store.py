@@ -33,19 +33,24 @@ VECTOR_FILE = "library_vectors.npz"   # saved in the Library folder
 # Text chunking
 # ---------------------------------------------------------------------------
 
+MAX_CHUNKS_PER_DOC = 80  # up to ~30 pages at the default CHUNK_SIZE
+
+
 def _chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
     """Split text into overlapping chunks at sentence boundaries where possible."""
     if not text:
         return []
-    # Hard safety cap — never process more than 8000 chars
     if len(text) < 50:
         return [text]
 
     chunks = []
-    start  = 0
-    max_chunks = 80  # up to 80 chunks for a 30-page document
+    start = 0
+    truncated = False
 
-    while start < len(text) and len(chunks) < max_chunks:
+    while start < len(text):
+        if len(chunks) >= MAX_CHUNKS_PER_DOC:
+            truncated = True
+            break
         end = min(start + size, len(text))
         if end < len(text):
             for sep in (". ", ".\n", "! ", "? ", "\n\n", "\n"):
@@ -59,6 +64,12 @@ def _chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP)
         start = end - overlap
         if start >= len(text):
             break
+
+    if truncated:
+        print(
+            f"  ! _chunk_text: capped at {MAX_CHUNKS_PER_DOC} chunks "
+            f"(document length {len(text):,} chars); tail not embedded."
+        )
 
     return chunks
 

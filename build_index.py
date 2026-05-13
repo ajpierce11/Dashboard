@@ -149,7 +149,11 @@ def flush():
     batch_v = []
     batch_m = []
 
-# Files to skip — these cause ILIAD API to hang indefinitely
+# Entry IDs that have historically caused the ILIAD embedding endpoint to
+# stall past the per-batch timeout. Populated manually after investigation
+# — add an entry here only after confirming the document reliably exhausts
+# the budget. Re-test periodically and remove entries that start working
+# again (likely after an ILIAD update).
 SKIP_ENTRY_IDS: set = {
     "1876-D46-055 - NOA Hydration Lift+TI_TechnicalReport_final_docx",
     "1876-D46-055 - NOA Hydration Lift+TI_TechnicalReport_final_pdf",
@@ -162,7 +166,10 @@ SKIP_ENTRY_IDS: set = {
     "2055-D01-065_Prolonged NOA Hydration Protocol_docx",
 }
 
-DOC_TIMEOUT = 120  # seconds — skip any document taking longer than this
+# Per-document overall budget. The HTTP request timeout inside
+# iliad_client.embed protects each batch; this watchdog catches the
+# pathological case where many batches each take close to the max.
+DOC_TIMEOUT = 120
 
 for di, doc in enumerate(docs_to_embed):
     if doc["entry_id"] in SKIP_ENTRY_IDS:
@@ -178,37 +185,19 @@ for di, doc in enumerate(docs_to_embed):
         continue
 
     doc_start = time.time()
-    
-    # Send chunks in smaller batches of 10 to avoid ILIAD timeouts on large docs
+
+    # Send chunks in smaller batches of 10 to avoid ILIAD timeouts on
+    # large docs. iliad_client.embed sets a per-HTTP-request timeout so a
+    # single hung batch can't stall forever — no need for a thread watchdog.
     EMBED_BATCH = 10
-    doc_ok = True
     for chunk_start in range(0, len(chunks), EMBED_BATCH):
-        # Skip rest of document if it's taking too long
         if time.time() - doc_start > DOC_TIMEOUT:
-            print(f"    ! Timeout — skipping remaining chunks of this document")
+            print(f"    ! Per-doc timeout — skipping remaining chunks")
             errors += len(chunks) - chunk_start
             break
         chunk_batch = chunks[chunk_start:chunk_start + EMBED_BATCH]
         try:
-            # Run embedding in a thread with hard timeout
-            import threading
-            result_holder = [None]
-            error_holder  = [None]
-            def _run():
-                try:
-                    result_holder[0] = _embed_batch(chunk_batch, API_KEY)
-                except Exception as e:
-                    error_holder[0] = e
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            t.join(timeout=25)  # hard 25s kill
-            if t.is_alive():
-                print(f"    ! Hard timeout on batch — skipping")
-                errors += len(chunk_batch)
-                continue
-            if error_holder[0]:
-                raise error_holder[0]
-            vecs = result_holder[0]
+            vecs = _embed_batch(chunk_batch, API_KEY)
             if not vecs:
                 print(f"    ! Empty embedding response for batch")
                 errors += len(chunk_batch)

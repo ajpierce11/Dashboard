@@ -4061,17 +4061,16 @@ def main() -> None:
     # text #EDF0FF (Light Blue), accent #A6B5E0 (Medium Blue).
     st.markdown("""
         <style>
-            /* Layout density + hide default Streamlit chrome.
-               The top header bar stays visible (transparent background) so
-               the sidebar collapse/expand arrow remains reachable when
-               teammates hide the sidebar. Menu + Deploy button are hidden
-               via #MainMenu and stDeployButton; footer killed outright. */
+            /* Layout density + hide only the specific Streamlit chrome we
+               don't want (menu, deploy button, footer). Keep the top
+               header bar visible so the sidebar expand arrow — which
+               lives in the header when the sidebar is collapsed — stays
+               reachable. Transparent background so it blends in. */
             .block-container { padding-top: 1.2rem !important; }
-            header[data-testid="stHeader"] { background: transparent; height: 0; }
-            header[data-testid="stHeader"] > div { display: none; }
-            [data-testid="collapsedControl"] { display: flex !important; }
+            header[data-testid="stHeader"] { background: transparent; }
             #MainMenu { visibility: hidden; }
             [data-testid="stDeployButton"] { display: none; }
+            .stDeployButton { display: none; }
             footer { visibility: hidden; }
             [data-testid="stCaptionContainer"] { margin-top: -0.25rem; color: #A6B5E0; }
 

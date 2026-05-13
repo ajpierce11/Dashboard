@@ -2,10 +2,17 @@
 
 Notable changes to the Testing Dashboard. Newest at top. Versioning is date-based since there's no semver published.
 
+## 2026-05-13 (even later)
+
+### Changed
+- **Switched to dark mode.** Default theme is now dark with AbbVie brand palette inverted: near-black background (`#0B1220`, a deepened Dark Blue), Light Blue text (`#EDF0FF`), Medium Blue (`#A6B5E0`) as the accent / primary-button color. Secondary background is a slate (`#1A2438`).
+- **Logo swap** — header uses the white AbbVie wordmark (`AbbVieLogo_white.png`), favicon uses the dark-blue-background variant, so the mark is visible against dark chrome.
+- **Chart palette** dropped Dark Blue (disappeared into the background) and swapped in the lighter secondary colors — Medium Blue, Light Red, Light Cobalt, Light Green, Light Purple, Light Copper. Plotly figures now use the `plotly_dark` template so axis labels and legends are light.
+
 ## 2026-05-13 (later)
 
 ### Added
-- **AbbVie logo** in the app header (left of the title) and as the browser-tab favicon. Loaded from `assets/`; if the file is missing the app falls back to the text-only header automatically so local dev still works.
+- **AbbVie logo** in the app header (left of the title) and as the browser-tab favicon. Loaded from `Assets/`; if the file is missing the app falls back to the text-only header automatically so local dev still works.
 
 ### Changed
 - **AbbVie brand theming pass.** Primary color is now AbbVie Dark Blue (`#071D49`), secondary background is Light Blue (`#EDF0FF`), body text is Dark Gray (`#4B4C4E`) per the brand guide. Titles use the brand Dark Blue with a Medium Blue accent bar.

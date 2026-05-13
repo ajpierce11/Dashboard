@@ -35,19 +35,19 @@ STATIC_PROPERTIES = [
     "Extrusion Force (50mm/min(N))",
 ]
 
-# Plotly color sequence — AbbVie brand palette. The dark secondary colors
-# (cobalt, red, green, purple, copper) read cleanly on white and give us
-# ~6 high-contrast series before cycling. Falls back to Plotly defaults if
-# a plot needs more series than we have brand colors for.
+# Plotly color sequence — AbbVie brand palette tuned for the dark theme.
+# Dark Blue is dropped because it disappears into the dark background; the
+# lighter secondary colors and Medium/Light Blue give us 8 high-contrast
+# series that all read cleanly on #0B1220.
 COLOR_SEQUENCE = [
-    "#071D49",  # AbbVie Dark Blue
-    "#0066F5",  # Curious Dark Cobalt
-    "#CF451C",  # Remarkable Dark Red
-    "#338700",  # Global Dark Green
-    "#8A2ECC",  # Purposeful Dark Purple
-    "#9C6B12",  # Dark Copper
     "#A6B5E0",  # AbbVie Medium Blue
+    "#F7634F",  # Remarkable Light Red
     "#00A1FF",  # Curious Light Cobalt
+    "#45AB00",  # Global Light Green
+    "#A86BDE",  # Purposeful Light Purple
+    "#DBA63D",  # Light Copper
+    "#EDF0FF",  # AbbVie Light Blue
+    "#0066F5",  # Curious Dark Cobalt (still readable)
 ]
 
 
@@ -209,6 +209,7 @@ def build_figure(
         ))
 
     fig.update_layout(
+        template="plotly_dark",
         title=dict(text="Lift capacity over time", font=dict(size=16)),
         xaxis_title="Timepoint",
         yaxis_title="Average value",
@@ -219,9 +220,9 @@ def build_figure(
         margin=dict(t=50, b=40, l=50, r=20),
         yaxis=dict(
             rangemode="tozero",
-            gridcolor="rgba(128,128,128,0.15)",
+            gridcolor="rgba(166,181,224,0.15)",
         ),
-        xaxis=dict(gridcolor="rgba(128,128,128,0.1)"),
+        xaxis=dict(gridcolor="rgba(166,181,224,0.1)"),
     )
     return fig
 
@@ -319,17 +320,18 @@ def build_properties_radar(
         ))
 
     fig.update_layout(
+        template="plotly_dark",
         polar=dict(
             bgcolor="rgba(0,0,0,0)",
             radialaxis=dict(
                 range=[0, 100],
                 showticklabels=False,
-                gridcolor="rgba(128,128,128,0.18)",
-                linecolor="rgba(128,128,128,0.18)",
+                gridcolor="rgba(166,181,224,0.18)",
+                linecolor="rgba(166,181,224,0.18)",
             ),
             angularaxis=dict(
-                gridcolor="rgba(128,128,128,0.12)",
-                linecolor="rgba(128,128,128,0.18)",
+                gridcolor="rgba(166,181,224,0.12)",
+                linecolor="rgba(166,181,224,0.18)",
                 tickfont=dict(size=12),
                 direction="clockwise",
             ),
@@ -420,6 +422,7 @@ def build_properties_bars(
         )
 
     fig.update_layout(
+        template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(t=10, b=10, l=40, r=10),
@@ -3860,8 +3863,10 @@ def main() -> None:
     # Resolve logo paths relative to this file so it works regardless of
     # where the user launches streamlit from.
     _here = Path(__file__).resolve().parent
-    _logo_path = _here / "Assets" / "AbbVieLogo_AbbVie dark blue.png"
-    _favicon_path = _here / "Assets" / "AbbVie-favicon-white-background-400x400.png"
+    # Dark theme → use the white wordmark and the dark-blue-background
+    # favicon so the AbbVie mark stays visible against dark chrome.
+    _logo_path = _here / "Assets" / "AbbVieLogo_white.png"
+    _favicon_path = _here / "Assets" / "AbbVie-favicon-AbbVie dark blue-background-400x400_Social.png"
 
     st.set_page_config(
         page_title="AbbVie Testing Dashboard",
@@ -3876,11 +3881,11 @@ def main() -> None:
         },
     )
 
-    # ── AbbVie brand styling ────────────────────────────────────────────────
-    # Light theming pass so the app reads as internal AbbVie tooling rather
-    # than a generic Streamlit demo. Colors mirror .streamlit/config.toml.
-    # Dark Blue #071D49 (primary), Medium Blue #A6B5E0 (accent), Light Blue
-    # #EDF0FF (secondary bg), Dark Gray #4B4C4E (body text).
+    # ── AbbVie brand styling (dark mode) ────────────────────────────────────
+    # Dark variant so the app reads as internal AbbVie tooling without the
+    # bright white default. Colors mirror .streamlit/config.toml.
+    # Background #0B1220 (deepened Dark Blue), secondary bg #1A2438 (slate),
+    # text #EDF0FF (Light Blue), accent #A6B5E0 (Medium Blue).
     st.markdown("""
         <style>
             /* Layout density + hide default Streamlit chrome */
@@ -3888,7 +3893,7 @@ def main() -> None:
             header[data-testid="stHeader"] { display: none; }
             #MainMenu { visibility: hidden; }
             footer { visibility: hidden; }
-            [data-testid="stCaptionContainer"] { margin-top: -0.25rem; color: #4B4C4E; }
+            [data-testid="stCaptionContainer"] { margin-top: -0.25rem; color: #A6B5E0; }
 
             /* Clean system font stack — avoids the default Streamlit
                Source Sans that teammates recognise as "the Streamlit look". */
@@ -3897,47 +3902,48 @@ def main() -> None:
                              "Helvetica Neue", Arial, sans-serif;
             }
 
-            /* Titled headers in AbbVie Dark Blue with Medium Blue accent bar */
+            /* Titled headers in Medium Blue with a brighter accent bar */
             h1 {
-                color: #071D49;
+                color: #EDF0FF;
                 margin-bottom: 0.15rem !important;
                 border-bottom: 3px solid #A6B5E0;
                 padding-bottom: 0.35rem;
                 letter-spacing: -0.01em;
             }
-            h2, h3 { color: #071D49; }
+            h2, h3 { color: #A6B5E0; }
 
             /* Tab bar */
             .stTabs [data-baseweb="tab-list"] {
                 gap: 0.25rem;
-                border-bottom: 1px solid #E8E8E8;
+                border-bottom: 1px solid #1A2438;
             }
             .stTabs [data-baseweb="tab"] {
-                color: #4B4C4E;
+                color: #A6B5E0;
                 font-weight: 500;
                 padding: 0.5rem 1rem;
             }
             .stTabs [data-baseweb="tab"][aria-selected="true"] {
-                color: #071D49;
-                border-bottom-color: #071D49 !important;
+                color: #EDF0FF;
+                border-bottom-color: #A6B5E0 !important;
             }
 
-            /* Buttons — primary type uses brand blue; secondary stays light */
+            /* Buttons — primary type uses Medium Blue; readable on dark bg */
             .stButton > button[kind="primary"],
             .stDownloadButton > button[kind="primary"] {
-                background-color: #071D49;
-                color: #FFFFFF;
+                background-color: #A6B5E0;
+                color: #071D49;
                 border: none;
+                font-weight: 600;
             }
             .stButton > button[kind="primary"]:hover,
             .stDownloadButton > button[kind="primary"]:hover {
-                background-color: #0a2858;
-                color: #FFFFFF;
+                background-color: #C3CEEC;
+                color: #071D49;
             }
 
-            /* Expanders/cards — subtle light-blue border instead of gray */
+            /* Expanders/cards — subtle slate border */
             [data-testid="stExpander"] {
-                border: 1px solid #EDF0FF;
+                border: 1px solid #1A2438;
                 border-radius: 6px;
             }
 

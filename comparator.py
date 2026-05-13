@@ -1509,6 +1509,64 @@ def _apply_organize_plan(selections: dict[str, str]) -> tuple[int, list[str]]:
     return moved, errors
 
 
+def _sync_library_and_vectors() -> None:
+    """
+    One-click admin action: run the metadata incremental scan and then
+    bring the vector index up to date in the same flow.
+
+    Before this existed, admins had to remember to (1) click Sync in the
+    Library tab AND (2) click Update index in the AI Assistant tab.
+    Forgetting step 2 meant new documents showed up in the library
+    browser but the AI couldn't find them in semantic search. This
+    helper collapses both into one button press.
+
+    Skips the vector step gracefully if ILIAD_API_KEY isn't set.
+    """
+    _incremental_scan_update()
+
+    api_key = iliad_client.get_api_key()
+    if not api_key:
+        st.info("Library synced. Vector index skipped — ILIAD_API_KEY is not set.")
+        return
+
+    vs = st.session_state.get("ai_vector_store")
+    if vs is None:
+        vs = VectorStore(LIBRARY_PATH, api_key)
+        vs._load()
+
+    if not vs.is_built():
+        st.info(
+            "No vector index yet — skipping the AI step. Go to the AI "
+            "Assistant tab and click Build document index when ready."
+        )
+        return
+
+    bar = st.progress(0, text="Updating AI vector index…")
+    def _cb(done: int, total: int, msg: str) -> None:
+        pct = int(done / max(total, 1) * 100)
+        bar.progress(min(pct, 100), text=msg)
+    try:
+        result = vs.update(progress_callback=_cb)
+    except Exception as e:
+        bar.empty()
+        st.error(f"Vector update failed: {e}")
+        return
+    bar.empty()
+
+    if "error" in result:
+        st.error(f"Vector update failed: {result['error']}")
+        return
+
+    st.session_state["ai_vector_store"] = vs
+    new_docs = result.get("new_documents", 0)
+    removed = result.get("removed", 0)
+    if new_docs or removed:
+        st.success(
+            f"Vector index updated — {new_docs} new document(s), "
+            f"{removed} removed."
+        )
+
+
 def _incremental_scan_update() -> dict:
     """
     Fast sync — only processes files that are new, modified, or deleted
@@ -2058,8 +2116,8 @@ def render_library() -> None:
         with sync_col:
             st.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
             if st.button("⚡ Sync", use_container_width=True,
-                         help="Process only new, modified, or deleted files since the last scan. Fast — use this after adding/removing files."):
-                _incremental_scan_update()
+                         help="Process new/modified/deleted files AND update the AI vector index in one pass. This is the button to use after adding files to Library/."):
+                _sync_library_and_vectors()
                 st.rerun()
         with rebuild_col:
             st.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
@@ -2168,8 +2226,8 @@ def render_library() -> None:
                 with col_sync:
                     if st.button("⚡ Sync (incremental)", key="mismatch_sync",
                                  use_container_width=True,
-                                 help="Process only new, modified, or deleted files. Fast."):
-                        _incremental_scan_update()
+                                 help="Process new/modified/deleted files AND update the AI vector index."):
+                        _sync_library_and_vectors()
                         st.rerun()
                 with col_rebuild:
                     if st.button("↻ Full rescan", key="force_rescan",
@@ -3410,10 +3468,10 @@ def _save_report_to_library(docx_bytes: bytes, filename: str) -> None:
         return
     st.success(
         f"Saved to `{dest.relative_to(lib)}`. Running Sync so it joins "
-        "the index now…"
+        "the library and AI indexes now…"
     )
     try:
-        _incremental_scan_update()
+        _sync_library_and_vectors()
     except Exception as e:
         st.warning(f"Saved, but Sync failed: {e}. Click Sync manually when convenient.")
 

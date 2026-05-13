@@ -137,7 +137,9 @@ The index is missing or has extra entries compared to disk. Click **⚡ Sync (in
 
 ### A new document isn't showing up in search
 
-Admins: click **⚡ Sync** at the top of the Library tab to add it to the metadata index, then go to the AI Assistant tab and click **⚡ Update index (new files only)** to embed it for semantic search.
+Admins: click **⚡ Sync** at the top of the Library tab. That single click runs the metadata scan AND updates the AI vector index in one pass, so the new file joins both the library browser and semantic search together.
+
+(If the vector index hasn't been built yet at all, Sync will skip the AI step and prompt you to use **⚡ Build document index** on the AI Assistant tab first.)
 
 ### Vector index looks corrupted (all searches return empty, or loading fails)
 

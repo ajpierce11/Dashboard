@@ -4,6 +4,9 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 
 ## 2026-05-13 (latest)
 
+### Changed
+- **Library Sync now also updates the AI vector index in one pass.** Previously admins had to click Sync in the Library tab *and* Update index in the AI Assistant tab separately, and forgetting the second step meant new docs were browsable but invisible to semantic search. A single Sync click now does both.
+
 ### Added
 - **Sidebar** with at-a-glance status — signed-in user + role (admin/viewer), data freshness (workbook, library index, vector index last-updated), and AI connection status.
 - **"New" badge** (✨) on library doc cards whose most recent file is within the last 7 days. Makes fresh material visually obvious.

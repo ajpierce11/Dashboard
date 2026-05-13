@@ -3857,10 +3857,16 @@ def _render_sources(sources: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Resolve logo paths relative to this file so it works regardless of
+    # where the user launches streamlit from.
+    _here = Path(__file__).resolve().parent
+    _logo_path = _here / "assets" / "AbbVieLogo_AbbVie dark blue.png"
+    _favicon_path = _here / "assets" / "AbbVie-favicon-white-background-400x400.png"
+
     st.set_page_config(
         page_title="AbbVie Testing Dashboard",
         layout="wide",
-        page_icon="🧪",
+        page_icon=str(_favicon_path) if _favicon_path.exists() else "🧪",
         menu_items={
             "About": (
                 "**AbbVie Testing Dashboard**\n\n"
@@ -3984,11 +3990,25 @@ def main() -> None:
 
     products = sorted(df["Product"].unique().tolist())
 
-    st.title("AbbVie – Testing Dashboard")
-    st.caption(
-        f"**{len(products)}** products · **{len(timepoints)}** timepoints · "
-        f"data source: `{Path(FILE_PATH).name}`"
-    )
+    # Header: logo on the left, title + caption on the right. If the logo
+    # file is missing, fall back to a title-only header so the app still
+    # runs in environments that don't have the assets folder.
+    if _logo_path.exists():
+        logo_col, title_col = st.columns([1, 9], gap="medium", vertical_alignment="center")
+        with logo_col:
+            st.image(str(_logo_path), width=110)
+        with title_col:
+            st.title("Testing Dashboard")
+            st.caption(
+                f"**{len(products)}** products · **{len(timepoints)}** timepoints · "
+                f"data source: `{Path(FILE_PATH).name}`"
+            )
+    else:
+        st.title("AbbVie – Testing Dashboard")
+        st.caption(
+            f"**{len(products)}** products · **{len(timepoints)}** timepoints · "
+            f"data source: `{Path(FILE_PATH).name}`"
+        )
 
     tab_comparator, tab_library, tab_ai, tab_report = st.tabs([
         "📈 Product Comparator",

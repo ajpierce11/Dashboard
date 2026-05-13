@@ -4157,28 +4157,39 @@ def render_comparator(
                 ]
             st.dataframe(summary_display, width="stretch")
 
-        # Export — single download button, bytes cached per selection
+        # Excel export — deferred. Building the multi-sheet workbook
+        # (4 sheets + an embedded chart via xlsxwriter) takes ~300-800ms
+        # and used to run on every rerun, producing the laggy-scroll
+        # window right after adding a product. Now we only build it when
+        # the user actually wants it.
         export_key = (tuple(sorted(selected_products)), int(n_per_group))
         cache = st.session_state.get("_xlsx_export_cache") or {}
-        if cache.get("key") != export_key:
-            cache = {
-                "key": export_key,
-                "data": build_excel_export(
-                    filtered, pivot_avg, pivot_std, product_properties,
-                    selected_products, timepoints, product_to_ref,
-                ),
-            }
-            st.session_state["_xlsx_export_cache"] = cache
         today = datetime.now().strftime("%Y-%m-%d")
-        st.download_button(
-            label="📥 Download Excel",
-            data=cache["data"],
-            file_name=f"product_comparison_{today}.xlsx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument"
-                ".spreadsheetml.sheet"
-            ),
-        )
+        if cache.get("key") == export_key:
+            st.download_button(
+                label="📥 Download Excel",
+                data=cache["data"],
+                file_name=f"product_comparison_{today}.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet"
+                ),
+            )
+        else:
+            if st.button("📥 Prepare Excel download",
+                         help="Build the export for the current selection. "
+                              "Separated from the main render so changing "
+                              "products stays responsive."):
+                with st.spinner("Building Excel export…"):
+                    bytes_out = build_excel_export(
+                        filtered, pivot_avg, pivot_std, product_properties,
+                        selected_products, timepoints, product_to_ref,
+                    )
+                st.session_state["_xlsx_export_cache"] = {
+                    "key":  export_key,
+                    "data": bytes_out,
+                }
+                st.rerun()
         # --- Statistics (inside left column to fill space beside properties) ---
         st.divider()
         st.subheader("Statistical comparisons")

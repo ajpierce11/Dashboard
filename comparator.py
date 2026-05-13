@@ -27,7 +27,6 @@ from config import FILE_PATH, LIBRARY_PATH
 from title_utils import base_title, clean_stem as _shared_clean_stem, display_title_from_filename
 import auth
 import ai_metadata
-import insights
 
 STATIC_PROPERTIES = [
     "HA Concentration (mg/mL)",
@@ -2459,6 +2458,13 @@ CRITICAL RULES FOR REFERENCES:
 
 Answer with maximum specificity based on the context. Include exact numerical values, timepoints, statistical findings, p-values, product concentrations, animal models, and explicit conclusions. Never give vague answers when specific data is available in the context. If specific numbers or findings appear in the documents, include them in your answer.
 
+CROSS-STUDY SYNTHESIS: When a question asks about patterns across multiple studies ("what have we learned about X", "what drives Y", "summarise the evidence for Z"), take these extra steps:
+- Organise the answer around claims or themes, not around individual studies. A claim may be supported by several studies; a study may contribute to several claims.
+- For each claim, cite every study in the retrieved context that supports OR contradicts it, with exact values where available. Do not silently average over disagreements.
+- Explicitly flag disagreements between studies when they exist: "Study A found X at 12w; Study B found roughly Y at the same timepoint in the same model — the discrepancy may be due to [methodological difference if stated]."
+- Respect product-class distinctions. HA-only, HA+biostimulatory, and regenerative fillers are different product categories with different intended effects. Do not compare them as if they were interchangeable unless the question specifically asks about cross-class comparison.
+- If the retrieved context is thin or clusters on a small subset of studies for the question asked, say so plainly at the end ("Retrieval pulled N studies; a broader set may exist in the library") so the user knows whether to trust the synthesis as comprehensive.
+
 FORMAT: Prefer bullet points, tables, and short labelled sections over prose paragraphs — same information, faster to read. Skip preambles ("Great question", "Based on the documents provided"), skip restating the question, skip closing suggestions ("Let me know if you need more details"). Start with the answer."""
 
 
@@ -4136,14 +4142,19 @@ def render_ai_assistant(
                 elif vs_instance is not None and vs_instance.is_built():
                     # When filters are active, pull a wider candidate pool
                     # so we still return enough after filtering.
+                    # Retrieval breadth. For broad synthesis questions
+                    # ("what have we learned about X") the model needs to
+                    # see more of the library than the 25-chunk default
+                    # previously pulled. Bumped to 40 so cross-study
+                    # synthesis has enough evidence to compare against.
                     if fulltext_chunks:
                         top_k = 5
                     elif has_study_num:
                         top_k = 12
                     else:
-                        top_k = 25
+                        top_k = 40
                     if active_filters:
-                        top_k = min(top_k * 2, 60)
+                        top_k = min(top_k * 2, 80)
                     st.write(f"Searching library index (top {top_k} matches)…")
                     chunks = vs_instance.search(question, top_k=top_k)
                     chunks = _apply_filter(chunks)
@@ -4581,12 +4592,11 @@ def main() -> None:
         with status_col:
             _render_user_status_badge()
 
-    tab_home, tab_comparator, tab_library, tab_ai, tab_insights, tab_report = st.tabs([
+    tab_home, tab_comparator, tab_library, tab_ai, tab_report = st.tabs([
         "🏠 Home",
         "📈 Product Comparator",
         "📚 Document Library",
         "🤖 AI Assistant",
-        "🔬 Insights",
         "📝 Report Generator",
     ])
 
@@ -4601,9 +4611,6 @@ def main() -> None:
 
     with tab_ai:
         render_ai_assistant(df, timepoints, product_to_ref, product_properties)
-
-    with tab_insights:
-        render_insights()
 
     with tab_report:
         render_report_generator()
@@ -4860,253 +4867,6 @@ def _render_extraction_diagnostics() -> None:
                 st.caption(f"…and {len(no_text) - 20} more.")
 
 
-def _render_coverage_matrix() -> None:
-    """
-    Products × models heatmap derived from the AI metadata cache.
-
-    Each cell = number of studies that matched that (product, model)
-    combination. Gives admins and bench scientists a fast view of
-    "where have we looked, and where haven't we?"
-    """
-    meta = ai_metadata.load_entries_keyed(LIBRARY_PATH)
-    if not meta:
-        st.caption(
-            "AI metadata hasn't been extracted yet. Click "
-            "**🧠 Refresh AI metadata** above to build the cache, then "
-            "this coverage matrix will populate."
-        )
-        return
-
-    rows = []
-    for eid, rec in meta.items():
-        if not rec.get("ok", False):
-            continue
-        # Skip no-text entries — they would all pile into (unspecified)
-        # and hide the real gaps in products that do have text.
-        if rec.get("note") == "no_text":
-            continue
-        products_raw = rec.get("product", "") or ""
-        products_list = [p.strip() for p in products_raw.split(",") if p.strip()]
-        if not products_list:
-            products_list = ["(unspecified)"]
-        model = (rec.get("model", "") or "").strip() or "(unspecified)"
-        for p in products_list:
-            rows.append({"Product": p, "Model": model, "entry_id": eid})
-
-    if not rows:
-        st.caption("No usable metadata yet. Try refreshing.")
-        return
-
-    cov_df = pd.DataFrame(rows)
-    counts = (
-        cov_df.groupby(["Product", "Model"])["entry_id"]
-        .count()
-        .unstack(fill_value=0)
-        .sort_index()
-    )
-    st.markdown("#### 🗺️ Coverage matrix")
-    st.caption(
-        "Each cell is the number of studies tagged with that product × "
-        "model pair. Zeros (blanks) flag gaps you may not have tested yet."
-    )
-    st.dataframe(counts, use_container_width=True)
-    with st.expander("What was extracted (raw)"):
-        # Show a small table of the per-entry extractions for spot-check.
-        sample = pd.DataFrame([
-            {
-                "Title": m.get("entry_id", "")[:60],
-                "Product": m.get("product", ""),
-                "Model": m.get("model", ""),
-                "Endpoints": ", ".join(m.get("endpoints", []) or []),
-                "Timepoints": ", ".join(m.get("timepoints", []) or []),
-            }
-            for m in meta.values() if m.get("ok", False)
-        ])
-        st.dataframe(sample, use_container_width=True, height=300)
-
-
-_SUGGEST_EXPERIMENTS_SYSTEM_PROMPT = """You are a senior scientific advisor to AbbVie's pre-clinical dermal-filler research team. The team develops HA-based fillers (Juvederm family, Voluma, etc.) and next-generation HA+biostimulatory/regenerative formulations. They test in vitro, ex vivo (skin), and in vivo (rat/mouse/other) models to understand lift, biostimulation, regenerative effect, collagen response, and material mechanics.
-
-You will be given a compact summary of the team's study coverage — a matrix of product × model study counts, plus identified coverage gaps. From that, propose 3–5 concrete high-leverage next experiments.
-
-For each suggestion, output:
-- **Title** — short, specific
-- **Hypothesis** — what we'd learn or test
-- **Why now** — which gap or pattern motivates it (reference the coverage data)
-- **Suggested model & endpoints** — be specific
-- **Expected effort** — a rough sense of scope (single timepoint / multi-timepoint / cross-product)
-
-Prefer experiments that:
-1. Close a coverage gap in a well-studied product (fast de-risking)
-2. Bridge an internal finding with a next-gen formulation question (maximum strategic value)
-3. Build methodological confidence for a capability the team wants long-term
-
-Avoid generic suggestions that could apply to any dermal filler program. Reference specific products and models from the data. If the data is thin, say so honestly rather than padding with platitudes.
-
-Format the entire response in markdown with H3 headings for each suggestion."""
-
-
-def _ai_suggest_experiments(coverage_text: str) -> str:
-    """
-    Send the coverage summary to the LLM and stream back strategic
-    experiment suggestions. Returns the full response text for display.
-    """
-    messages = [
-        {"role": "system", "content": _SUGGEST_EXPERIMENTS_SYSTEM_PROMPT},
-        {"role": "user",   "content": (
-            "Here is the current library's coverage summary. Suggest "
-            "3-5 next experiments per the instructions.\n\n" + coverage_text
-        )},
-    ]
-    try:
-        return "".join(_call_iliad_nonstreaming(
-            messages, max_tokens=2000, timeout=120,
-        ))
-    except Exception as e:
-        return f"⚠️ Suggestion call failed: {type(e).__name__}: {e}"
-
-
-def render_insights() -> None:
-    """
-    Analytical views over the AI-extracted metadata cache. Everything
-    here is deterministic — no LLM calls — so it's cheap to browse
-    and reproducible across sessions.
-    """
-    st.subheader("🔬 Insights")
-    st.caption(
-        "Views across every study with extracted metadata. Numbers "
-        "come from the AI-metadata cache on the share. If something "
-        "looks off, run **🧠 Refresh AI metadata** on the Home tab."
-    )
-
-    meta = ai_metadata.load_entries_keyed(LIBRARY_PATH)
-    rows = insights.flatten(meta)
-
-    if not rows:
-        st.info(
-            "No AI metadata available yet. Go to the **🏠 Home** tab "
-            "and click **🧠 Refresh AI metadata** to build the cache."
-        )
-        return
-
-    # ── Gap analysis ─────────────────────────────────────────────────────
-    st.markdown("### 📉 Coverage gaps")
-    st.caption(
-        "Products that have been studied in at least 2 models but have "
-        "zero studies in another — candidate experiments to run. "
-        "Sorted by how well-studied the product is overall, so gaps in "
-        "your most-tested products bubble to the top."
-    )
-    gaps = insights.find_gaps(rows, min_same_product_other_models=2)
-    if not gaps:
-        st.caption(
-            "_No obvious gaps — either every product is tested in every "
-            "model we know about, or there isn't enough coverage yet to "
-            "tell. Run more studies and come back._"
-        )
-    else:
-        st.caption(f"Showing top {min(20, len(gaps))} of {len(gaps)} gaps.")
-        gaps_df = pd.DataFrame([
-            {
-                "Product":            g["product"],
-                "Missing model":      g["missing_model"],
-                "Tested in":          ", ".join(g["covered_models"]),
-                "Total studies":      g["total_studies"],
-            }
-            for g in gaps[:20]
-        ])
-        st.dataframe(gaps_df, use_container_width=True, hide_index=True)
-
-    st.divider()
-
-    # ── Methodology navigator ────────────────────────────────────────────
-    st.markdown("### 🔬 Methodology navigator")
-    st.caption(
-        "Every endpoint measured across the library, with the studies "
-        "that measured it. Use this to find prior methodology when "
-        "designing a new study."
-    )
-
-    summary = insights.endpoint_summary_table(rows)
-    if summary.empty:
-        st.caption("No endpoints extracted yet.")
-    else:
-        search = st.text_input(
-            "🔍 Filter endpoints",
-            placeholder="e.g. collagen, elasticity, water uptake",
-            key="insights_endpoint_search",
-            label_visibility="collapsed",
-        ).strip().lower()
-
-        shown = summary
-        if search:
-            shown = summary[summary["Endpoint"].str.lower().str.contains(search, na=False)]
-
-        st.dataframe(shown, use_container_width=True, hide_index=True, height=260)
-
-        # Detail view — pick one endpoint and see every study that used it.
-        endpoint_pick = st.selectbox(
-            "Show studies for:",
-            options=[""] + list(shown["Endpoint"]),
-            key="insights_endpoint_pick",
-        )
-        if endpoint_pick:
-            detail = insights.studies_for_endpoint(rows, endpoint_pick)
-            if not detail.empty:
-                st.caption(
-                    f"**{len(detail)} study row(s)** measured _{endpoint_pick}_:"
-                )
-                st.dataframe(detail, use_container_width=True, hide_index=True)
-
-    st.divider()
-
-    # ── AI: suggest next experiments ─────────────────────────────────────
-    st.markdown("### 🧭 Suggest next experiments")
-    st.caption(
-        "Claude reads the coverage matrix + top gaps and proposes 3–5 "
-        "concrete experiments with hypotheses, models, and endpoints. "
-        "This is a strategic brainstorm, not a rubber-stamp — review "
-        "each suggestion critically and dismiss anything that doesn't "
-        "fit the current roadmap."
-    )
-
-    if not iliad_client.get_api_key():
-        st.info("ILIAD_API_KEY is not set, so AI suggestions are unavailable.")
-    else:
-        # Cache the last suggestion per-session so accidental reruns don't
-        # cost another LLM call.
-        existing = st.session_state.get("insights_suggestions")
-        col_btn, col_clear = st.columns([1, 1])
-        with col_btn:
-            if st.button("🧭 Generate suggestions",
-                         use_container_width=True, key="insights_suggest_btn"):
-                matrix = insights.coverage_matrix(rows)
-                cov_text = insights.coverage_summary_text(matrix, gaps)
-                with st.spinner("Thinking… (can take 30–60s for a longer reply)"):
-                    reply = _ai_suggest_experiments(cov_text)
-                st.session_state["insights_suggestions"] = {
-                    "generated_at": datetime.now().isoformat(),
-                    "text":         reply,
-                }
-                st.rerun()
-        with col_clear:
-            if existing and st.button(
-                "🗑 Clear suggestions", use_container_width=True,
-                key="insights_suggest_clear"
-            ):
-                st.session_state.pop("insights_suggestions", None)
-                st.rerun()
-
-        if existing:
-            try:
-                ts = datetime.fromisoformat(existing["generated_at"])
-                st.caption(f"Generated {_format_relative(ts)}.")
-            except Exception:
-                pass
-            with st.container(border=True):
-                st.markdown(existing["text"])
-
-
 def render_home(
     df: pd.DataFrame,
     timepoints: list[str],
@@ -5234,7 +4994,6 @@ def render_home(
 
     st.divider()
     _render_extraction_diagnostics()
-    _render_coverage_matrix()
 
 
 def render_comparator(

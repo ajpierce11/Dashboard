@@ -5,11 +5,7 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 ## 2026-05-13
 
 ### Added
-- **🔬 Insights tab** with four analytical features built on the AI-metadata cache:
-  - **Coverage gaps** — ranked list of (product, missing model) pairs where a well-studied product has never been tested in a given model. Deterministic analytics — no LLM calls, no surprises.
-  - **Methodology navigator** — every endpoint measured across the library with study counts and a drill-in that lists each study (product + model + timepoints) that measured it. Useful for "how have we measured X before."
-  - **Suggest next experiments** (AI-powered) — Claude reads the coverage matrix + top gaps and proposes 3–5 strategic experiments with hypotheses, models, and endpoints. Tailored to the pre-clinical dermal filler program.
-  - **Metadata filters on AI Assistant** — multiselect for product / model / endpoint gates all retrieval (fulltext, vector, keyword fallback) so questions stay scoped. "Methods we've used for collagen endpoints in rat models" only pulls matching studies.
+- **Metadata filters on AI Assistant** — multiselect for product / model / endpoint gates all retrieval (fulltext, vector, keyword fallback) so questions stay scoped. "Methods we've used for collagen endpoints in rat models" only pulls matching studies.
 - **🧠 AI metadata enrichment layer** — new `ai_metadata.py` module walks the library and has the LLM extract structured scientific fields (product, model, endpoints, timepoints) per study, cached in `Library/library_ai_metadata.json`. Runs incrementally — only new/changed studies are re-processed — so subsequent refreshes are seconds. Sits alongside `library_index.json` and `library_vectors.npz` without replacing either.
 - **🗺 Coverage matrix** on the Home tab — heatmap of studies by product × model, built from the AI metadata. Makes "where have we looked, and where haven't we?" a glanceable question. Includes a raw-extraction view so admins can spot-check the AI's tagging.
 - **🏠 Home tab** — new first tab with recent library additions (last 14 days), data freshness across workbook / index / vectors, and a welcome line. Replaces "open each tab to see what's there" with a glanceable landing page.
@@ -28,6 +24,9 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 - **Troubleshooting + runbook** section in the README covering workbook lock, key rotation, corrupted index, and common failure modes.
 
 ### Changed
+- **AI Assistant system prompt** now includes explicit cross-study synthesis guidance — organise answers by claim not by study, flag disagreements between studies, respect product-class distinctions (HA-only vs biostimulatory vs regenerative are different categories, not interchangeable), and say so plainly when retrieval was thin so the user knows whether to trust the synthesis as comprehensive.
+- **Default retrieval breadth** bumped from 25 → 40 chunks for broad questions without a specific study number, giving synthesis questions more evidence to compare against.
+- **Removed the Insights tab.** The coverage matrix / gap analysis / suggest-next-experiments features rewarded the wrong primitive (structural cell-counting) rather than mechanistic synthesis. Kept the AI-metadata cache underneath since the filters and future synthesis features build on it; deleted `insights.py`.
 - **Dark mode** with AbbVie brand palette. Near-black background (`#0B1220`), Light Blue text (`#EDF0FF`), Medium Blue (`#A6B5E0`) as the accent. Plotly figures use the `plotly_dark` template; chart palette rebuilt around the lighter brand colors so every series stays visible on dark.
 - **Typography** uses a system font stack instead of Streamlit's Source Sans, removing the most recognisable "Streamlit app" tell. Hamburger menu and "Made with Streamlit" footer hidden.
 - **Library Sync now also updates the AI vector index in one pass** — a single click handles both indexes. Previously admins had to click Sync and then Update index separately, and forgetting the second step meant new docs were browsable but invisible to semantic search.

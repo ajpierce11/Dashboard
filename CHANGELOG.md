@@ -5,6 +5,9 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 ## 2026-05-13
 
 ### Added
+- **🏠 Home tab** — new first tab with recent library additions (last 14 days), data freshness across workbook / index / vectors, and a welcome line. Replaces "open each tab to see what's there" with a glanceable landing page.
+- **⭐ Library bookmarks** — star any document to pin it to your Home tab. Stored per-user under `Library/.user_prefs/<username>.json` so bookmarks follow you across machines.
+- **AI follow-up suggestions** — after every AI answer, the model proposes 3 concise follow-up questions as buttons. Click one to queue it as the next turn.
 - **Admin gating** via `DASHBOARD_ADMINS` env var. Only listed users see Sync, Rebuild, Build-index, Organize, and Save-to-Library buttons; everyone else gets read-only banners with the admin's contact info.
 - **Save generated reports to Library** (admin-only) — Report Generator can drop a .docx straight into `Library/Study Reports/` and trigger a Sync so it joins the index immediately.
 - **Export chat as Markdown** button next to Clear conversation.

@@ -3602,6 +3602,55 @@ def _save_report_to_library(docx_bytes: bytes, filename: str) -> None:
         st.warning(f"Saved, but Sync failed: {e}. Click Sync manually when convenient.")
 
 
+_FOLLOWUP_SYSTEM_PROMPT = (
+    "You suggest short follow-up questions a scientist might ask after "
+    "an answer from a soft-tissue / material testing data assistant. "
+    "Output EXACTLY 3 follow-up questions, one per line. No numbering, "
+    "no bullets, no preamble, no trailing punctuation. Each under 15 "
+    "words. Prefer concrete next steps (numerical comparisons, methods, "
+    "related studies) over abstract rephrasings of the original question."
+)
+
+
+def _generate_followups(question: str, answer: str) -> list[str]:
+    """
+    Make a short follow-up call to the LLM and parse 3 suggested next
+    questions. Runs after the main streamed answer; adds ~2-4 s of
+    latency but returns nothing when the AI is unavailable so the UI
+    just hides the buttons gracefully.
+    """
+    if not iliad_client.get_api_key():
+        return []
+    # Trim the inputs aggressively — follow-ups don't need the full
+    # library context or a long reply, just the shape of the exchange.
+    q_short = question[:600]
+    a_short = answer[:1500]
+    messages = [
+        {"role": "system", "content": _FOLLOWUP_SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            f"User question:\n{q_short}\n\n"
+            f"Assistant answer:\n{a_short}\n\n"
+            "List 3 follow-up questions now."
+        )},
+    ]
+    try:
+        raw = "".join(
+            _call_iliad_nonstreaming(messages, max_tokens=200, timeout=20)
+        )
+    except Exception as e:
+        print(f"[_generate_followups] {type(e).__name__}: {e}")
+        return []
+
+    lines = [
+        ln.strip(" -–—•*0123456789.").strip()
+        for ln in raw.splitlines()
+        if ln.strip()
+    ]
+    # Drop error markers if the gateway was unreachable
+    lines = [ln for ln in lines if not ln.startswith("⚠️")]
+    return lines[:3]
+
+
 def _conversation_as_markdown(messages: list[dict]) -> str:
     """Serialize the chat history for the Export button."""
     lines: list[str] = [
@@ -3846,12 +3895,27 @@ def render_ai_assistant(
 
     # Display conversation history, with sources rendered under each
     # assistant turn so users can verify any past answer, not just the last.
-    for msg in st.session_state["ai_messages"]:
+    for mi, msg in enumerate(st.session_state["ai_messages"]):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if msg["role"] == "assistant":
                 if msg.get("sources"):
                     _render_sources(msg["sources"])
+                # Follow-up suggestion buttons — clicking queues the
+                # question for the next turn. Only shown on the most
+                # recent assistant message so older turns don't clutter
+                # the scroll with stale buttons.
+                followups = msg.get("followups") or []
+                is_last = (mi == len(st.session_state["ai_messages"]) - 1)
+                if followups and is_last:
+                    st.caption("Suggested follow-ups:")
+                    cols = st.columns(min(len(followups), 3))
+                    for fi, q in enumerate(followups[:3]):
+                        with cols[fi]:
+                            if st.button(q, key=f"ai_followup_{mi}_{fi}",
+                                         use_container_width=True):
+                                st.session_state["ai_queued_question"] = q
+                                st.rerun()
                 # "Copy raw" expander — st.code has a built-in clipboard
                 # button, and wrapping in an expander keeps it unobtrusive.
                 with st.expander("📋 Copy raw text", expanded=False):
@@ -4007,10 +4071,19 @@ def render_ai_assistant(
             if sources_for_msg:
                 _render_sources(sources_for_msg)
 
+            # Follow-up question suggestions — a second, tiny AI call so
+            # users don't have to invent the next question themselves.
+            # Rendered as buttons that queue the question for the next
+            # turn. Runs after the main answer so the primary response
+            # feels fast.
+            with st.spinner("Suggesting follow-up questions…"):
+                followups = _generate_followups(question, reply)
+
         st.session_state["ai_messages"].append({
-            "role":    "assistant",
-            "content": reply,
-            "sources": sources_for_msg,
+            "role":      "assistant",
+            "content":   reply,
+            "sources":   sources_for_msg,
+            "followups": followups,
         })
 
     # ── Controls ─────────────────────────────────────────────────────────────

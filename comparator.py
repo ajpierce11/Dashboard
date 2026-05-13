@@ -35,6 +35,17 @@ STATIC_PROPERTIES = [
     "Extrusion Force (50mm/min(N))",
 ]
 
+# Shared config for every plotly_chart call. scrollZoom=False stops Plotly
+# from swallowing the page scroll wheel when the cursor crosses a chart —
+# that was the main cause of rubber-band / laggy scrolling on the Product
+# Comparator tab. displaylogo=False hides the Plotly branding link.
+PLOTLY_CONFIG = {
+    "scrollZoom": False,
+    "displaylogo": False,
+    "displayModeBar": False,
+}
+
+
 # Plotly color sequence — AbbVie brand palette tuned for the dark theme.
 # Dark Blue is dropped because it disappears into the dark background; the
 # lighter secondary colors and Medium/Light Blue give us 8 high-contrast
@@ -4132,7 +4143,7 @@ def render_comparator(
         fig = build_figure(
             filtered, pivot_avg, pivot_std, selected_products, product_to_ref
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
         st.subheader("Time-series summary (mean ± SD)")
         if not pivot_avg.empty:
@@ -4244,7 +4255,7 @@ def render_comparator(
                 product_properties, selected_products, product_to_ref
             )
             if radar_fig:
-                st.plotly_chart(radar_fig, width="stretch")
+                st.plotly_chart(radar_fig, width="stretch", config=PLOTLY_CONFIG)
 
             st.caption(
                 "Radar axes are normalised per attribute against all products in the "
@@ -4256,7 +4267,7 @@ def render_comparator(
                 product_properties, selected_products, product_to_ref
             )
             if bars_fig:
-                st.plotly_chart(bars_fig, width="stretch")
+                st.plotly_chart(bars_fig, width="stretch", config=PLOTLY_CONFIG)
 
             st.subheader("Product properties")
             props_display = product_properties.loc[valid_products_for_props].copy()

@@ -9,7 +9,6 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 - **Save generated reports to Library** (admin-only) — Report Generator can drop a .docx straight into `Library/Study Reports/` and trigger a Sync so it joins the index immediately.
 - **Export chat as Markdown** button next to Clear conversation.
 - **"Copy raw text" expander** under each AI Assistant message — uses `st.code`'s built-in clipboard button so users can paste answers into email/reports as markdown.
-- **Clickable source links** — each cited document in an AI answer is now a `file://` link that opens in Word/Acrobat from the shared drive.
 - **Build-time pre-flight** — admins see the embed scope and rough ETA ("Update will embed 3 new, remove 0. ~10 s.") before clicking.
 - **"New" badge** (✨) on library doc cards whose most recent file is within the last 7 days.
 - **Search-match highlighting** — library search highlights the matched substring in each card title.
@@ -29,6 +28,16 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 - **Excel export** is no longer built on every rerun — a **Prepare Excel download** button builds it on demand. Main browse flow stays responsive after selection changes.
 - **Plotly scroll-zoom disabled** so charts no longer hijack the page scroll wheel.
 
+### Security / correctness (pre-launch review pass)
+- **Admin gating fails closed on CML.** If `DASHBOARD_ADMINS` is unset while running on a CML deployment (detected via `CDSW_*` env vars), nobody is admin until it's configured. Previously an unset variable silently made every teammate an admin — exactly the opposite of safe default for a shared deployment.
+- **Sync lockfile.** `_sync_library_and_vectors` now drops a short-TTL lockfile in `Library/` so two admins clicking Sync simultaneously don't overlap and stomp each other's writes.
+- **Sync no longer silently triggers a full rebuild.** If the vector `.npz` fails to load (corruption, transient I/O), Sync shows a clear error and points to the Full rebuild button instead of falling through to a surprise 10-minute rebuild.
+- **`build_index.py` now writes the same `index_stamp` + atomic save** as `VectorStore._save`. Fixes the "consider rebuilding" nag reappearing permanently after every CLI build.
+- **PDF-extract cache** switched from `@st.cache_resource` to `@st.cache_data` so a transient parse failure doesn't poison the cache for the rest of the session. Cache size bumped from 64 to 256 entries.
+- **Removed broken `file://` citation links** — they only resolved for the machine running the app; teammates' browsers would hit their own disk or a 404. Plain titles shown instead; a proper share-path link scheme is a future addition.
+- **n = 10 default warning** promoted from a small caption to a prominent warning banner, since it silently drives every reported p-value and the Significance column in the Excel export.
+- **Internal-study starter prompt.** The "Summarise study X" example now prefers Study Reports / Study Protocols / Test Methods entries, so the example doesn't point at an external publication when an alphabetically earlier paper exists.
+
 ### Fixed
 - Atomic write for `library_vectors.npz` — two concurrent saves or a crash mid-save can no longer leave a partial file that every reader treats as corrupted.
 - `needs_rebuild()` compares the library's logical `last_updated` stamp (now embedded inside the .npz) instead of filesystem mtimes, so the "consider rebuilding" nag only appears when content actually changed.
@@ -36,6 +45,9 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 - Workbook-locked errors (someone else has the Excel file open) show a friendly message with a Retry button instead of a technical traceback.
 - Report Generator hard-returns when the vector index isn't built, eliminating a `NoneType` crash on generate.
 - Chat "follow-up" detection no longer matches bare "it"/"its", which previously treated "is it ok?" as a reference to the prior document.
+- Dark-mode contrast fixes: the "revisions" and "preview" chips on library cards now use explicit brand hex (they had been using Streamlit's internal CSS vars that resolved to light-theme colors).
+- Plotly hover tooltips get an explicit dark bubble styled with brand colors (were bright-white flashes on the near-black chart background).
+- Copy-raw-text code block drops the markdown syntax highlighter — defaults to a neutral dark panel.
 
 ## 2026-05-12
 

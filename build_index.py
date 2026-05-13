@@ -141,11 +141,28 @@ def flush():
     else:
         save_v = new_arr
         save_m = all_new_metadata
+
+    # Stamp the library index's last_updated into the archive so that
+    # VectorStore.needs_rebuild() can compare logical versions rather
+    # than filesystem mtimes. Without this, the "consider rebuilding"
+    # warning reappears permanently after every CLI build.
+    index_stamp = ""
+    try:
+        with open(index_path, "r", encoding="utf-8") as _f:
+            index_stamp = json.load(_f).get("last_updated", "")
+    except Exception:
+        pass
+
+    # Atomic write: .tmp + os.replace. A second writer or a crash mid-save
+    # can no longer leave a partial .npz that every reader fails to load.
+    tmp_file = vector_file.with_suffix(vector_file.suffix + ".tmp")
     np.savez_compressed(
-        str(vector_file),
+        str(tmp_file),
         vectors=save_v,
         metadata=np.array([json.dumps(m) for m in save_m], dtype=object),
+        index_stamp=np.array([index_stamp], dtype=object),
     )
+    os.replace(str(tmp_file), str(vector_file))
     batch_v = []
     batch_m = []
 

@@ -234,6 +234,8 @@ def build_figure(
             gridcolor="rgba(166,181,224,0.15)",
         ),
         xaxis=dict(gridcolor="rgba(166,181,224,0.1)"),
+        hoverlabel=dict(bgcolor="#1A2438", font_color="#EDF0FF",
+                        bordercolor="#A6B5E0"),
     )
     return fig
 
@@ -332,6 +334,8 @@ def build_properties_radar(
 
     fig.update_layout(
         template="plotly_dark",
+        hoverlabel=dict(bgcolor="#1A2438", font_color="#EDF0FF",
+                        bordercolor="#A6B5E0"),
         polar=dict(
             bgcolor="rgba(0,0,0,0)",
             radialaxis=dict(
@@ -439,6 +443,8 @@ def build_properties_bars(
         margin=dict(t=10, b=10, l=40, r=10),
         height=220,
         bargap=0.25,
+        hoverlabel=dict(bgcolor="#1A2438", font_color="#EDF0FF",
+                        bordercolor="#A6B5E0"),
     )
     return fig
 
@@ -1509,6 +1515,57 @@ def _apply_organize_plan(selections: dict[str, str]) -> tuple[int, list[str]]:
     return moved, errors
 
 
+_SYNC_LOCK_FILE = ".sync.lock"
+_SYNC_LOCK_TTL_SECONDS = 120
+
+
+def _acquire_sync_lock() -> bool:
+    """
+    Best-effort mutual exclusion so two admins clicking Sync at the same
+    moment don't both walk the library and stomp each other's .npz
+    writes. Writes a small JSON file in Library/ with owner + timestamp.
+    Returns True if we got the lock. If an existing lock is fresh
+    (under _SYNC_LOCK_TTL_SECONDS) we show a banner and bail.
+    """
+    lock_path = Path(LIBRARY_PATH) / _SYNC_LOCK_FILE
+    now = datetime.now()
+
+    if lock_path.exists():
+        try:
+            data = json.loads(lock_path.read_text(encoding="utf-8"))
+            ts = datetime.fromisoformat(data.get("ts", ""))
+            owner = data.get("owner", "someone")
+            age = (now - ts).total_seconds()
+            if age < _SYNC_LOCK_TTL_SECONDS:
+                st.warning(
+                    f"⏳ Sync already in progress — started by "
+                    f"**{owner}** {int(age)}s ago. Please wait and "
+                    f"try again in a minute."
+                )
+                return False
+        except Exception:
+            # Corrupt lock file — safe to overwrite.
+            pass
+
+    try:
+        lock_path.write_text(
+            json.dumps({"owner": auth.current_user(), "ts": now.isoformat()}),
+            encoding="utf-8",
+        )
+        return True
+    except OSError as e:
+        st.error(f"Could not create sync lock: {e}")
+        return False
+
+
+def _release_sync_lock() -> None:
+    lock_path = Path(LIBRARY_PATH) / _SYNC_LOCK_FILE
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+
+
 def _sync_library_and_vectors() -> None:
     """
     One-click admin action: run the metadata incremental scan and then
@@ -1520,8 +1577,18 @@ def _sync_library_and_vectors() -> None:
     browser but the AI couldn't find them in semantic search. This
     helper collapses both into one button press.
 
-    Skips the vector step gracefully if ILIAD_API_KEY isn't set.
+    Skips the vector step gracefully if ILIAD_API_KEY isn't set. Uses
+    a short-TTL lockfile so two admins can't stomp each other.
     """
+    if not _acquire_sync_lock():
+        return
+    try:
+        _run_sync_body()
+    finally:
+        _release_sync_lock()
+
+
+def _run_sync_body() -> None:
     _incremental_scan_update()
 
     api_key = iliad_client.get_api_key()
@@ -1530,14 +1597,27 @@ def _sync_library_and_vectors() -> None:
         return
 
     vs = st.session_state.get("ai_vector_store")
+    load_ok = True
     if vs is None:
         vs = VectorStore(LIBRARY_PATH, api_key)
-        vs._load()
+        load_ok = vs._load()
 
     if not vs.is_built():
         st.info(
             "No vector index yet — skipping the AI step. Go to the AI "
             "Assistant tab and click Build document index when ready."
+        )
+        return
+
+    # The .npz file exists but _load() failed (partial write / network
+    # hiccup / version mismatch). Refuse to fall through — otherwise
+    # vs.update() sees _vectors=None and silently runs a full build,
+    # which can be a 10+ minute surprise job.
+    if not load_ok or vs._vectors is None:
+        st.error(
+            "Vector index file exists but failed to load. It may be "
+            "corrupted. Open the **AI Assistant** tab and click "
+            "**🔄 Full rebuild** to re-embed from scratch."
         )
         return
 
@@ -1565,6 +1645,11 @@ def _sync_library_and_vectors() -> None:
             f"Vector index updated — {new_docs} new document(s), "
             f"{removed} removed."
         )
+    else:
+        # Always give feedback that the vector step actually ran.
+        # Without this, Save-to-Library looks like it silently did
+        # nothing if the file was already indexed.
+        st.info("Vector index already in sync — no embedding work needed.")
 
 
 def _incremental_scan_update() -> dict:
@@ -2029,10 +2114,11 @@ def render_doc_card(group: dict, card_key: str, search: str = "") -> None:
         display_title = _highlight(group["title"], search) if search else group["title"]
         title_md = f"**{display_title}**" if not search else f"<strong>{display_title}</strong>"
         if has_versions:
+            # Explicit brand colors (not Streamlit CSS vars) so the chip
+            # reads correctly on the dark theme.
             title_md += (
                 f" &nbsp;<span style='font-size:11px;"
-                f"background:var(--color-background-info);"
-                f"color:var(--color-text-info);padding:2px 7px;"
+                f"background:#1A2438;color:#EDF0FF;padding:2px 7px;"
                 f"border-radius:10px'>🔄 {n_versions} revisions</span>"
             )
         # ✨ badge when the most-recent file mtime is within the last 7 days.
@@ -2051,7 +2137,7 @@ def render_doc_card(group: dict, card_key: str, search: str = "") -> None:
             with st.expander("Preview", expanded=False):
                 st.markdown(
                     f"<p style='font-size:12px;line-height:1.6;"
-                    f"color:var(--color-text-secondary)'>"
+                    f"color:#A6B5E0'>"
                     f"{group['preview'][:350]}…</p>",
                     unsafe_allow_html=True,
                 )
@@ -2558,17 +2644,29 @@ def _index_build_preflight(vs: VectorStore | None) -> str:
     )
 
 
-@st.cache_resource(show_spinner=False, max_entries=64)
+@st.cache_data(show_spinner=False, max_entries=256)
 def _cached_extract_text_impl(filepath: str, mtime: float) -> str:
+    """
+    Pickle-cached text extraction. @st.cache_data (not cache_resource)
+    is deliberate: cache_resource caches raised exceptions for the life
+    of the session, so a single transient network blip on the share
+    would mark a file "unreadable" until restart. cache_data caches
+    values only — exceptions re-raise each call, and the caller falls
+    back to an empty string.
+    """
     from doc_text import extract_text
-    return extract_text(filepath)
+    try:
+        return extract_text(filepath)
+    except Exception as e:
+        print(f"[_cached_extract_text] {filepath}: {type(e).__name__}: {e}")
+        return ""
 
 
 def _cached_extract_text(filepath: str) -> str:
     """
-    Module-level cache (bounded to 64 entries) for expensive PDF/DOCX parsing,
-    keyed by (filepath, mtime). Avoids storing extracted text in session_state,
-    which Streamlit pickles on every rerun and would grow unbounded.
+    Bounded cache for expensive PDF/DOCX parsing, keyed by (filepath, mtime).
+    Lives in Streamlit's cache (process-wide, not per-session) so repeated
+    hits from multiple users share one parse.
     """
     try:
         mtime = Path(filepath).stat().st_mtime
@@ -3521,7 +3619,11 @@ def _starter_prompts(df: pd.DataFrame, products: list[str]) -> list[str]:
     else:
         compare_line = "Compare material properties across products."
 
-    # Pull the first real study number from the library index if we can find one.
+    # Pull a real internal study number from the library index if we can
+    # find one. Prefer Study Reports / Study Protocols / Test Methods —
+    # an alphabetical scan used to pick the first matching entry, which
+    # could be an external Publication, making the starter prompt point
+    # at a paper instead of an internal study.
     study_line = (
         "Summarise the most recent study report including endpoints, methods, "
         "and conclusions."
@@ -3532,17 +3634,28 @@ def _starter_prompts(df: pd.DataFrame, products: list[str]) -> list[str]:
             with open(index_path, "r", encoding="utf-8") as f:
                 entries = json.load(f).get("entries", [])
             sn_re = re.compile(r"[A-Za-z0-9]+-[A-Za-z0-9]+-[A-Za-z0-9]+")
-            for e in entries:
-                if e.get("deleted"):
-                    continue
-                title = e.get("display_name") or e.get("title", "")
-                m = sn_re.search(title)
-                if m:
-                    study_line = (
-                        f"Summarise study {m.group(0)} including endpoints, "
-                        f"methods, and conclusions."
-                    )
-                    break
+            internal_cats = {"Study Reports", "Study Protocols", "Test Methods"}
+
+            def _find(pred) -> str | None:
+                for e in entries:
+                    if e.get("deleted"):
+                        continue
+                    if not pred(e):
+                        continue
+                    title = e.get("display_name") or e.get("title", "")
+                    m = sn_re.search(title)
+                    if m:
+                        return m.group(0)
+                return None
+
+            picked = _find(lambda e: e.get("category") in internal_cats)
+            if picked is None:
+                picked = _find(lambda _e: True)  # fall back to any category
+            if picked is not None:
+                study_line = (
+                    f"Summarise study {picked} including endpoints, "
+                    f"methods, and conclusions."
+                )
     except Exception:
         pass
 
@@ -3714,7 +3827,9 @@ def render_ai_assistant(
                 # "Copy raw" expander — st.code has a built-in clipboard
                 # button, and wrapping in an expander keeps it unobtrusive.
                 with st.expander("📋 Copy raw text", expanded=False):
-                    st.code(msg["content"], language="markdown")
+                    # language=None gives a plain dark panel — the markdown
+                    # highlighter's default colors clashed with the brand dark theme.
+                    st.code(msg["content"], language=None)
 
     # ── Starter prompts (empty state) ────────────────────────────────────────
     if not st.session_state["ai_messages"]:
@@ -3935,24 +4050,18 @@ def _render_sources(sources: list[dict]) -> None:
     if not unique:
         return
 
-    try:
-        index_mtime = (Path(LIBRARY_PATH) / "library_index.json").stat().st_mtime
-    except OSError:
-        index_mtime = 0.0
-    title_map = _title_to_filepath(index_mtime)
-
+    # We used to emit file:// hyperlinks here, but those only resolve for
+    # whichever machine the app is running on. When served through CML
+    # (teammates' browsers) a file:// URL points at their own disk, not
+    # the admin's — the link either does nothing or 404s. Browsers also
+    # block file:// navigation from HTTP pages for security. Source
+    # titles stay as plain labels until there's a proper
+    # share-path-aware link scheme (planned DASHBOARD_FILE_LINK_BASE
+    # env var if we need it later).
     lines: list[str] = []
     for s in unique:
         title = s["title"]
         cat = f" _({s['category']})_" if s.get("category") else ""
-        fp = s.get("filepath") or title_map.get(title.lower(), "")
-        if fp:
-            try:
-                uri = Path(fp).as_uri()
-                lines.append(f"- [**{title}**]({uri}){cat}")
-                continue
-            except Exception:
-                pass
         lines.append(f"- **{title}**{cat}")
 
     n_chunks = len(sources)
@@ -4302,11 +4411,18 @@ def render_comparator(
         f"**{n_with_props}** with material properties"
     )
 
-    # Only warn about the default n=10 when stats will actually run
+    # The default n=10 is scientifically load-bearing — it drives every
+    # t-test p-value, the ANOVA, the Fisher combined p-values, and the
+    # "Significant?" column in the exported workbook. A caption is too
+    # quiet for that. Show a real warning banner until the user has
+    # either acknowledged the default or moved the input.
     if n_per_group == 10 and n_with_ts >= 2:
-        st.caption(
-            "⚠️ Using default **n=10** for statistical tests — update the "
-            "control above to match your actual replicate count if different."
+        st.warning(
+            "⚠️ **n = 10 is the default**, not your actual replicate count. "
+            "All statistical tests below, the ANOVA, the Fisher combined "
+            "p-values, and the exported Significance column use this n. "
+            "Set it to your real sample size above before interpreting "
+            "the results."
         )
 
     # Products with no time-series rows at all (e.g. no lift data in the sheet)

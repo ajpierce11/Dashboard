@@ -81,7 +81,9 @@ DASHBOARD_ADMINS=piercax,jdoe,asmith
 
 **Everyone else** can browse the library, use the AI Assistant, run the comparator, and use the Report Generator (download only). They see informational banners telling them who to ask if something is missing or out of date.
 
-If `DASHBOARD_ADMINS` is unset, the current user is treated as admin (useful for local development).
+**Default when unset:**
+- **Local dev** → current user is treated as admin (frictionless single-user development).
+- **On CML** → nobody is admin, everyone sees the read-only view. Deliberately fails closed: the whole point of admin gating is preventing concurrent writes on a shared deployment, so an accidental oversight must not grant everyone write access. Remember to set `DASHBOARD_ADMINS` on the CML project before teammates arrive.
 
 ---
 

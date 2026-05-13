@@ -40,14 +40,29 @@ def _admin_list() -> list[str]:
     return [u.strip().lower() for u in raw.split(",") if u.strip()]
 
 
+def _on_cml() -> bool:
+    """True when the app is running inside Cloudera ML."""
+    for var in ("CDSW_PROJECT", "CDSW_DOMAIN", "CDSW_APP_PORT", "CDSW_ENGINE_ID"):
+        if os.environ.get(var):
+            return True
+    return False
+
+
 def is_admin() -> bool:
     """
-    True when the current user is in DASHBOARD_ADMINS, or when the
-    variable is unset (treat as single-user dev mode).
+    True when the current user is in DASHBOARD_ADMINS.
+
+    Behaviour when DASHBOARD_ADMINS is unset:
+      - Local dev (no CML env) → True, so single-user development is
+        frictionless.
+      - CML (any CDSW_* var set) → False. On a hosted multi-tenant
+        deployment, forgetting to configure admins must fail closed,
+        not open: otherwise every teammate gets write access to the
+        shared library and the entire point of admin gating is lost.
     """
     admins = _admin_list()
     if not admins:
-        return True  # unset → permissive (local dev)
+        return not _on_cml()
     return current_user().lower() in admins
 
 

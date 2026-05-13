@@ -2049,6 +2049,7 @@ def render_library() -> None:
 
     index_path = lib_path / "library_index.json"
     index_entry_count = 0
+    index_file_count = 0
     index_last_updated = ""
     if index_path.exists():
         try:
@@ -2056,24 +2057,37 @@ def render_library() -> None:
             with open(index_path) as _f:
                 _idx = _json.load(_f)
             entries_all = _idx.get("entries", [])
-            index_entry_count = sum(1 for e in entries_all if not e.get("deleted"))
+            live_entries = [e for e in entries_all if not e.get("deleted")]
+            index_entry_count = len(live_entries)
+            # Count individual files across all non-deleted entries. This is
+            # the apples-to-apples comparison against files-on-disk — a single
+            # entry can hold multiple files (protocol + report, or .docx +
+            # .pdf pairs), so entry count alone would produce spurious warnings.
+            index_file_count = sum(len(e.get("files", [])) for e in live_entries)
             index_last_updated = _idx.get("last_updated", "")
         except Exception:
             pass
 
-    # A mismatch means the index is out of date — expand the diagnostic so the
-    # user can see which folders are affected and force a rescan. When counts
-    # match, stay silent.
-    mismatch = index_path.exists() and total_files_on_disk != index_entry_count
+    # A mismatch means the index is genuinely out of date — either new files
+    # on disk haven't been indexed, or indexed files have been deleted.
+    # Stay silent when the counts match.
+    mismatch = index_path.exists() and total_files_on_disk != index_file_count
 
     if mismatch:
+        diff = total_files_on_disk - index_file_count
+        direction = "more on disk" if diff > 0 else "fewer on disk"
         with st.expander(
-            f"⚠️ Library mismatch — disk has {total_files_on_disk} files, "
-            f"index has {index_entry_count}. Click to investigate.",
+            f"⚠️ Library out of sync — {abs(diff)} {direction} than in the "
+            f"index ({total_files_on_disk} vs {index_file_count}). "
+            "Click to investigate.",
             expanded=True,
         ):
-            st.caption(f"Files at root: {len([f for f in top_files if f.suffix.lower() in SUPPORTED_EXTS])}"
-                       f"  |  Subfolders: {len(top_dirs)}")
+            st.caption(
+                f"Files at root: "
+                f"{len([f for f in top_files if f.suffix.lower() in SUPPORTED_EXTS])}"
+                f"  |  Subfolders: {len(top_dirs)}"
+                f"  |  Index entries (document groups): {index_entry_count}"
+            )
             if folder_file_counts:
                 st.markdown("**Files per subfolder:**")
                 for name, count in sorted(folder_file_counts.items()):
@@ -2081,9 +2095,19 @@ def render_library() -> None:
             if index_last_updated:
                 st.caption(f"Index last updated: {index_last_updated}")
 
-            if st.button("Force full rescan now", key="force_rescan"):
-                _run_scan_with_progress()
-                st.rerun()
+            col_sync, col_rebuild = st.columns(2)
+            with col_sync:
+                if st.button("⚡ Sync (incremental)", key="mismatch_sync",
+                             use_container_width=True,
+                             help="Process only new, modified, or deleted files. Fast."):
+                    _incremental_scan_update()
+                    st.rerun()
+            with col_rebuild:
+                if st.button("↻ Full rescan", key="force_rescan",
+                             use_container_width=True,
+                             help="Rebuild the whole index from scratch. Slower."):
+                    _run_scan_with_progress()
+                    st.rerun()
 
     library = load_library(LIBRARY_PATH)
     total   = sum(len(v) for v in library.values())

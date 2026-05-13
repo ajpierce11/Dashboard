@@ -2654,9 +2654,31 @@ def _stream_iliad(
     except requests.exceptions.Timeout:
         yield "⚠️ Request timed out. The API may be busy — please try again."
     except requests.exceptions.HTTPError as e:
-        yield f"⚠️ API error {e.response.status_code}: {e.response.text}"
+        yield _format_http_error(e)
     except Exception as e:
-        yield f"⚠️ Streaming error: {e}"
+        print(f"[_stream_iliad] {type(e).__name__}: {e}")
+        yield "⚠️ Connection to the LLM gateway failed. Please try again."
+
+
+def _format_http_error(e: requests.exceptions.HTTPError) -> str:
+    """
+    Turn a gateway error into a short user-facing line. Full body goes to
+    the terminal so admins can still diagnose, but the chat pane stays
+    readable — ILIAD error responses can be multi-KB HTML.
+    """
+    status = getattr(e.response, "status_code", "?")
+    try:
+        body_preview = e.response.text[:200] if e.response is not None else ""
+    except Exception:
+        body_preview = ""
+    print(f"[iliad] HTTP {status}: {body_preview}")
+    if status == 401 or status == 403:
+        return "⚠️ ILIAD rejected the API key. Check ILIAD_API_KEY and retry."
+    if status == 429:
+        return "⚠️ Rate limited by the LLM gateway. Wait a moment and retry."
+    if isinstance(status, int) and 500 <= status < 600:
+        return "⚠️ The LLM gateway returned a server error. Try again in a moment."
+    return f"⚠️ LLM gateway returned HTTP {status}. Try again shortly."
 
 
 def _call_iliad_nonstreaming(
@@ -2699,9 +2721,10 @@ def _call_iliad_nonstreaming(
     except requests.exceptions.Timeout:
         yield "⚠️ Request timed out. The API may be busy — please try again."
     except requests.exceptions.HTTPError as e:
-        yield f"⚠️ API error {e.response.status_code}: {e.response.text}"
+        yield _format_http_error(e)
     except Exception as e:
-        yield f"⚠️ Unexpected error: {e}"
+        print(f"[_call_iliad_nonstreaming] {type(e).__name__}: {e}")
+        yield "⚠️ Connection to the LLM gateway failed. Please try again."
 
 
 def _call_iliad(messages: list[dict]) -> str:
@@ -3157,15 +3180,36 @@ def render_report_generator() -> None:
             today = datetime.now().strftime("%Y-%m-%d")
             source_label = Path(generated["source_filename"]).stem
             safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", source_label)[:80] or "report"
-            dl_col, clear_col = st.columns(2)
+            out_fname = (
+                f"{safe_stem}_{generated['output_type'].lower().replace(' ', '_')}"
+                f"_{today}.docx"
+            )
+            dl_col, save_col, clear_col = st.columns(3)
             with dl_col:
                 st.download_button(
                     "⬇ Download as Word (.docx)",
                     data=docx_bytes,
-                    file_name=f"{safe_stem}_{generated['output_type'].lower().replace(' ', '_')}_{today}.docx",
+                    file_name=out_fname,
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     use_container_width=True,
                 )
+            with save_col:
+                # Admin-only: drop the generated .docx directly into the
+                # Library folder so it joins the indexed knowledge base
+                # without a manual download → move → sync round-trip.
+                if auth.is_admin():
+                    if st.button("💾 Save to Library", key="rg_save_library",
+                                 use_container_width=True,
+                                 help="Write the report into Library/Study Reports and run Sync."):
+                        _save_report_to_library(docx_bytes, out_fname)
+                else:
+                    st.button(
+                        "💾 Save to Library",
+                        key="rg_save_library_disabled",
+                        use_container_width=True,
+                        disabled=True,
+                        help=f"Admin-only. Ask {auth.admin_contact()} to save it.",
+                    )
             with clear_col:
                 if st.button("Clear report", key="rg_clear", use_container_width=True):
                     st.session_state.pop("_rg_generated", None)
@@ -3282,6 +3326,122 @@ def _run_report_generation(
     st.rerun()
 
 
+def _save_report_to_library(docx_bytes: bytes, filename: str) -> None:
+    """
+    Write a generated report directly into Library/Study Reports/ and
+    trigger an incremental sync so it shows up immediately. Refuses to
+    overwrite an existing file — the admin should rename first.
+    """
+    lib = Path(LIBRARY_PATH)
+    dest_dir = lib / "Study Reports"
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        st.error(f"Could not create Study Reports folder: {e}")
+        return
+    dest = dest_dir / filename
+    if dest.exists():
+        st.error(
+            f"`{filename}` already exists in Library/Study Reports. "
+            "Download the report, rename it, and drop it on the share manually."
+        )
+        return
+    try:
+        dest.write_bytes(docx_bytes)
+    except OSError as e:
+        st.error(f"Write failed: {e}")
+        return
+    st.success(
+        f"Saved to `{dest.relative_to(lib)}`. Running Sync so it joins "
+        "the index now…"
+    )
+    try:
+        _incremental_scan_update()
+    except Exception as e:
+        st.warning(f"Saved, but Sync failed: {e}. Click Sync manually when convenient.")
+
+
+def _conversation_as_markdown(messages: list[dict]) -> str:
+    """Serialize the chat history for the Export button."""
+    lines: list[str] = [
+        f"# AbbVie Testing Dashboard — chat export",
+        f"_{datetime.now():%Y-%m-%d %H:%M}_",
+        "",
+    ]
+    for m in messages:
+        role = m.get("role", "")
+        if role == "user":
+            lines.append(f"## You\n\n{m.get('content','')}\n")
+        elif role == "assistant":
+            lines.append(f"## Assistant\n\n{m.get('content','')}\n")
+            sources = m.get("sources") or []
+            titles_seen: set[str] = set()
+            if sources:
+                lines.append("**Sources**")
+                for s in sources:
+                    t = s.get("title", "")
+                    if t and t not in titles_seen:
+                        titles_seen.add(t)
+                        cat = f" _({s['category']})_" if s.get("category") else ""
+                        lines.append(f"- {t}{cat}")
+                lines.append("")
+    return "\n".join(lines)
+
+
+def _starter_prompts(df: pd.DataFrame, products: list[str]) -> list[str]:
+    """
+    Build the "Try asking" examples from the live dataset + index so they
+    stay relevant as the library and products change. We used to hardcode
+    a specific study number — new teammates whose library doesn't contain
+    that study would see a broken example.
+    """
+    # Pick two real products that actually appear in the workbook.
+    two_products = products[:2] if len(products) >= 2 else products
+    if len(two_products) == 2:
+        compare_line = (
+            f"Compare the material properties of {two_products[0]} and {two_products[1]}."
+        )
+    elif len(two_products) == 1:
+        compare_line = f"Summarise the material properties of {two_products[0]}."
+    else:
+        compare_line = "Compare material properties across products."
+
+    # Pull the first real study number from the library index if we can find one.
+    study_line = (
+        "Summarise the most recent study report including endpoints, methods, "
+        "and conclusions."
+    )
+    try:
+        index_path = Path(LIBRARY_PATH) / "library_index.json"
+        if index_path.exists():
+            with open(index_path, "r", encoding="utf-8") as f:
+                entries = json.load(f).get("entries", [])
+            sn_re = re.compile(r"[A-Za-z0-9]+-[A-Za-z0-9]+-[A-Za-z0-9]+")
+            for e in entries:
+                if e.get("deleted"):
+                    continue
+                title = e.get("display_name") or e.get("title", "")
+                m = sn_re.search(title)
+                if m:
+                    study_line = (
+                        f"Summarise study {m.group(0)} including endpoints, "
+                        f"methods, and conclusions."
+                    )
+                    break
+    except Exception:
+        pass
+
+    return [
+        "Which product has the highest lift capacity at 52 weeks?",
+        compare_line,
+        study_line,
+        # Scoped to Test Methods + Study Protocols to surface the SOP /
+        # methodology layer rather than results.
+        "How have we measured water uptake in prior work? Only cite "
+        "Test Methods and Study Protocols.",
+    ]
+
+
 def render_ai_assistant(
     df: pd.DataFrame,
     timepoints: list[str],
@@ -3291,6 +3451,7 @@ def render_ai_assistant(
     """Render the AI assistant chat tab."""
 
     st.subheader("🤖 AI Assistant")
+    products = sorted(df["Product"].unique().tolist())
 
     # ── Chat history ─────────────────────────────────────────────────────────
     # Initialise vector store (one per session)
@@ -3439,12 +3600,7 @@ def render_ai_assistant(
     if not st.session_state["ai_messages"]:
         with st.container(border=True):
             st.markdown("**Try asking:**")
-            examples = [
-                "Which product has the highest lift capacity at 52 weeks?",
-                "Compare the material properties of Voluma and Harmonyca.",
-                "Summarise study 1745-D76-054 including endpoints, methods, and conclusions.",
-                "What do the reports say about hydration performance over time?",
-            ]
+            examples = _starter_prompts(df, products)
             cols = st.columns(2)
             for i, ex in enumerate(examples):
                 with cols[i % 2]:
@@ -3596,10 +3752,52 @@ def render_ai_assistant(
 
     # ── Controls ─────────────────────────────────────────────────────────────
     if st.session_state["ai_messages"]:
-        if st.button("🗑 Clear conversation", key="ai_clear"):
-            st.session_state["ai_messages"] = []
-            st.session_state.pop("ai_last_doc_chunks", None)
-            st.rerun()
+        ctrl_clear, ctrl_export = st.columns([1, 1])
+        with ctrl_clear:
+            if st.button("🗑 Clear conversation", key="ai_clear",
+                         use_container_width=True):
+                st.session_state["ai_messages"] = []
+                st.session_state.pop("ai_last_doc_chunks", None)
+                st.rerun()
+        with ctrl_export:
+            st.download_button(
+                "⬇️ Export as Markdown",
+                data=_conversation_as_markdown(st.session_state["ai_messages"]),
+                file_name=f"dashboard-chat-{datetime.now():%Y%m%d-%H%M}.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
+
+
+@st.cache_data(show_spinner=False)
+def _title_to_filepath(mtime: float) -> dict[str, str]:
+    """
+    {entry title (lower) → filepath} lookup built from the library index.
+    Keyed on the index mtime so it refreshes after a Sync. Used by
+    _render_sources to link each citation back to the actual file on
+    the shared drive.
+    """
+    mapping: dict[str, str] = {}
+    index_path = Path(LIBRARY_PATH) / "library_index.json"
+    if not index_path.exists():
+        return mapping
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            entries = json.load(f).get("entries", [])
+    except Exception:
+        return mapping
+    for e in entries:
+        if e.get("deleted"):
+            continue
+        title = (e.get("display_name") or e.get("title") or "").lower()
+        files = e.get("files", [])
+        # Prefer the first file with a filepath; skip entries that have none.
+        for f in files:
+            fp = f.get("filepath", "")
+            if fp:
+                mapping.setdefault(title, fp)
+                break
+    return mapping
 
 
 def _render_sources(sources: list[dict]) -> None:
@@ -3616,9 +3814,31 @@ def _render_sources(sources: list[dict]) -> None:
             unique.append(s)
     if not unique:
         return
-    labels = [f"**{s['title']}**" + (f" _({s['category']})_" if s.get("category") else "")
-              for s in unique]
-    st.caption("📄 Sources: " + " · ".join(labels))
+
+    try:
+        index_mtime = (Path(LIBRARY_PATH) / "library_index.json").stat().st_mtime
+    except OSError:
+        index_mtime = 0.0
+    title_map = _title_to_filepath(index_mtime)
+
+    lines: list[str] = []
+    for s in unique:
+        title = s["title"]
+        cat = f" _({s['category']})_" if s.get("category") else ""
+        fp = s.get("filepath") or title_map.get(title.lower(), "")
+        if fp:
+            try:
+                uri = Path(fp).as_uri()
+                lines.append(f"- [**{title}**]({uri}){cat}")
+                continue
+            except Exception:
+                pass
+        lines.append(f"- **{title}**{cat}")
+
+    n_chunks = len(sources)
+    n_docs = len(unique)
+    header = f"📄 Sources ({n_chunks} chunk(s) → {n_docs} document(s)):"
+    st.markdown(header + "\n" + "\n".join(lines))
 
 # ---------------------------------------------------------------------------
 # App layout

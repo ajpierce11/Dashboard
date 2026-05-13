@@ -4635,49 +4635,71 @@ def _refresh_ai_metadata() -> None:
     bar.empty()
 
     st.success(
-        f"Extracted **{result['extracted']}** new/changed studies, "
-        f"pruned **{result['orphaned']}** orphaned entries. "
-        f"Errors: {result['errors']}."
+        f"Extracted **{result['extracted']}** new/changed studies · "
+        f"**{result.get('no_text', 0)}** skipped (no extractable text) · "
+        f"pruned **{result['orphaned']}** orphaned entries · "
+        f"**{result['errors']}** transient errors (will retry next refresh)."
     )
 
 
 def _render_extraction_diagnostics() -> None:
     """
-    When extraction has failures, summarise them so the admin can see
-    the pattern instead of hunting through 500 JSON records. Grouped
-    by error message with counts and a few example titles.
+    Show a breakdown of any AI-metadata extraction issues. Two buckets:
+      - Transient failures (HTTP 429, timeouts, parse misses) — will
+        auto-retry on the next refresh.
+      - No-extractable-text skips — informational, won't retry. These
+        are typically scanned PDFs or image-only documents that our
+        text extractor can't read. Surface them so the admin can
+        decide whether to OCR or skip permanently.
     """
     meta = ai_metadata.load_entries_keyed(LIBRARY_PATH)
     if not meta:
         return
     failures = [m for m in meta.values() if not m.get("ok", False)]
-    if not failures:
+    no_text = [m for m in meta.values()
+               if m.get("ok", False) and m.get("note") == "no_text"]
+
+    if not failures and not no_text:
         return
 
-    with st.expander(
-        f"⚠️ {len(failures)} extraction failure(s) — click to diagnose",
-        expanded=True,
-    ):
-        # Bucket by error message
-        from collections import defaultdict
-        buckets: dict[str, list[dict]] = defaultdict(list)
-        for rec in failures:
-            err = rec.get("error", "unknown")
-            # Trim the error so near-identical messages group together.
-            # e.g. "HTTPError: 429 Too Many Requests..." vs "HTTPError: 429 ..."
-            short = err[:120]
-            buckets[short].append(rec)
+    from collections import defaultdict
 
-        for err, recs in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
-            st.markdown(f"**{len(recs)} failure(s):** `{err}`")
-            # Show first three entry_ids to spot any pattern
-            sample = ", ".join(r.get("entry_id", "")[:40] for r in recs[:3])
-            st.caption(f"Examples: {sample}")
+    if failures:
+        with st.expander(
+            f"⚠️ {len(failures)} transient failure(s) — will retry on next refresh",
+            expanded=True,
+        ):
+            buckets: dict[str, list[dict]] = defaultdict(list)
+            for rec in failures:
+                err = rec.get("error", "unknown")[:120]
+                buckets[err].append(rec)
+            for err, recs in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
+                st.markdown(f"**{len(recs)} failure(s):** `{err}`")
+                sample = ", ".join(r.get("entry_id", "")[:40] for r in recs[:3])
+                st.caption(f"Examples: {sample}")
+            st.caption(
+                "Click **🧠 Refresh AI metadata** again to retry these. "
+                "Rate-limit errors should clear once the gateway cools off."
+            )
 
-        st.caption(
-            "Copy the top error line back to chat — it determines the fix "
-            "(rate limit, timeout, response parse, etc.)."
-        )
+    if no_text:
+        with st.expander(
+            f"ℹ️ {len(no_text)} document(s) skipped — no extractable text",
+            expanded=False,
+        ):
+            st.caption(
+                "These files returned empty text from the PDF/DOCX parser. "
+                "Most common cause: scanned or image-only PDFs without a "
+                "text layer. OCR would recover them but is out of scope "
+                "for now. They stay in the library; they just don't "
+                "contribute to the coverage matrix or AI-metadata features."
+            )
+            sample = "\n".join(
+                f"- {rec.get('entry_id', '')}" for rec in no_text[:20]
+            )
+            st.markdown(sample)
+            if len(no_text) > 20:
+                st.caption(f"…and {len(no_text) - 20} more.")
 
 
 def _render_coverage_matrix() -> None:
@@ -4700,6 +4722,10 @@ def _render_coverage_matrix() -> None:
     rows = []
     for eid, rec in meta.items():
         if not rec.get("ok", False):
+            continue
+        # Skip no-text entries — they would all pile into (unspecified)
+        # and hide the real gaps in products that do have text.
+        if rec.get("note") == "no_text":
             continue
         products_raw = rec.get("product", "") or ""
         products_list = [p.strip() for p in products_raw.split(",") if p.strip()]

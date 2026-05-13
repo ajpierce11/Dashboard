@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -32,9 +33,15 @@ AI_METADATA_FILE = "library_ai_metadata.json"
 SCHEMA_VERSION = 1
 
 # How many parallel extraction workers. Each is a blocking HTTPS request
-# through iliad_client, so threads work fine. 10 gives roughly 10x speedup
-# over sequential without obviously abusing the gateway.
-EXTRACTION_WORKERS = 10
+# through iliad_client, so threads work fine. Started at 10; observed
+# ~50% HTTP 429 rate at that level from the ILIAD gateway, so dropped to
+# 3 plus a retry loop with exponential backoff in _extract_one.
+EXTRACTION_WORKERS = 3
+
+# Retry tuning for HTTP 429 (rate limited) and transient 5xx responses
+# from the gateway. Back-off is 2s, 4s, 8s — with 3 retries a transient
+# throttle window under a minute resolves without the admin re-running.
+EXTRACTION_MAX_RETRIES = 3
 
 # Per-study text cap. Enough to cover abstract + methods + results for a
 # typical study; trimming keeps the per-call token count predictable.
@@ -100,21 +107,32 @@ def _entry_mtime(entry: dict) -> str:
 
 def _extract_one(entry_id: str, title: str, text: str) -> dict:
     """
-    Call the LLM once and parse its JSON. Returns a record dict on success
-    or a minimal stub on failure so the cache always has an entry per
-    processed study (prevents endless retry loops on a bad document).
+    Call the LLM once (with retry on 429/5xx) and parse its JSON.
+
+    Returns a record dict for every call — success, hard failure, or
+    "skipped" — so the cache always has an entry per processed study.
+
+    The three outcomes:
+      - ok=True:  fields populated; won't be retried on next refresh.
+      - ok=True + note="no_text": no extractable text; skip permanently
+        so scanned PDFs and placeholders don't fail the pass forever.
+      - ok=False: transient error (rate limit, timeout, parse miss);
+        will be retried on the next refresh.
     """
+    base = {
+        "entry_id":     entry_id,
+        "product":      "",
+        "model":        "",
+        "endpoints":    [],
+        "timepoints":   [],
+        "extracted_at": datetime.now().isoformat(),
+    }
+
     if not text.strip():
-        return {
-            "entry_id":     entry_id,
-            "product":      "",
-            "model":        "",
-            "endpoints":    [],
-            "timepoints":   [],
-            "extracted_at": datetime.now().isoformat(),
-            "ok":           False,
-            "error":        "no text",
-        }
+        # Don't count as an error — many library entries (scanned PDFs,
+        # image-only docs, work instructions that are all tables) legit
+        # have no extractable text. Mark done so we don't keep retrying.
+        return {**base, "ok": True, "note": "no_text", "error": ""}
 
     trimmed = text[:EXTRACTION_TEXT_CAP]
     messages = [
@@ -124,45 +142,42 @@ def _extract_one(entry_id: str, title: str, text: str) -> dict:
             f"Study text:\n{trimmed}"
         )},
     ]
-    try:
-        resp = iliad_client.post_chat(
-            messages, max_tokens=400, stream=False, timeout=60
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        return {
-            "entry_id":     entry_id,
-            "product":      "",
-            "model":        "",
-            "endpoints":    [],
-            "timepoints":   [],
-            "extracted_at": datetime.now().isoformat(),
-            "ok":           False,
-            "error":        f"{type(e).__name__}: {e}",
-        }
+
+    last_err = ""
+    for attempt in range(EXTRACTION_MAX_RETRIES + 1):
+        try:
+            resp = iliad_client.post_chat(
+                messages, max_tokens=400, stream=False, timeout=60
+            )
+            status = getattr(resp, "status_code", 0)
+            # Retry on 429 (rate limit) and 5xx (gateway transient errors)
+            if status == 429 or 500 <= status < 600:
+                last_err = f"HTTP {status}"
+                if attempt < EXTRACTION_MAX_RETRIES:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                return {**base, "ok": False, "error": f"{last_err} after retries"}
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            if attempt < EXTRACTION_MAX_RETRIES:
+                time.sleep(2 ** (attempt + 1))
+                continue
+            return {**base, "ok": False, "error": last_err}
 
     raw = _extract_text_from_response(data)
     parsed = _parse_json_loose(raw)
     if not isinstance(parsed, dict):
-        return {
-            "entry_id":     entry_id,
-            "product":      "",
-            "model":        "",
-            "endpoints":    [],
-            "timepoints":   [],
-            "extracted_at": datetime.now().isoformat(),
-            "ok":           False,
-            "error":        "unparseable response",
-        }
+        return {**base, "ok": False, "error": "unparseable response"}
 
     return {
-        "entry_id":     entry_id,
+        **base,
         "product":      str(parsed.get("product", "") or "").strip(),
         "model":        str(parsed.get("model", "") or "").strip(),
         "endpoints":    [str(x).strip() for x in parsed.get("endpoints", []) if str(x).strip()],
         "timepoints":   [str(x).strip() for x in parsed.get("timepoints", []) if str(x).strip()],
-        "extracted_at": datetime.now().isoformat(),
         "ok":           True,
         "error":        "",
     }
@@ -298,6 +313,7 @@ def run_extraction(
         return result
 
     done = 0
+    no_text_count = 0
     with ThreadPoolExecutor(max_workers=EXTRACTION_WORKERS) as pool:
         futures = {pool.submit(_one, p): p for p in to_extract}
         for fut in as_completed(futures):
@@ -307,6 +323,8 @@ def run_extraction(
                 cache["entries"][eid] = rec
                 if not rec.get("ok", False):
                     errors += 1
+                elif rec.get("note") == "no_text":
+                    no_text_count += 1
             done += 1
             if progress_callback:
                 pair = futures[fut]
@@ -318,10 +336,11 @@ def run_extraction(
 
     save_metadata(library_path, cache)
     return {
-        "extracted": done,
-        "skipped":   skipped,
-        "orphaned":  len(orphan_ids),
-        "errors":    errors,
+        "extracted":   done - no_text_count - errors,
+        "no_text":     no_text_count,
+        "skipped":     skipped,
+        "orphaned":    len(orphan_ids),
+        "errors":      errors,
     }
 
 

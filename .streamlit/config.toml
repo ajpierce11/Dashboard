@@ -1,2 +1,12 @@
 [server]
 runOnSave = true
+
+# AbbVie brand palette — see comparator.main() for matching CSS.
+# Dark Blue (#071D49) / White / Medium Blue (#A6B5E0) / Light Blue (#EDF0FF)
+# Text intentionally not pure black — brand guide uses Dark Gray #4B4C4E.
+[theme]
+base = "light"
+primaryColor = "#071D49"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#EDF0FF"
+textColor = "#4B4C4E"

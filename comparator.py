@@ -35,8 +35,20 @@ STATIC_PROPERTIES = [
     "Extrusion Force (50mm/min(N))",
 ]
 
-# Plotly color sequence – professional, print-friendly
-COLOR_SEQUENCE = px.colors.qualitative.D3
+# Plotly color sequence — AbbVie brand palette. The dark secondary colors
+# (cobalt, red, green, purple, copper) read cleanly on white and give us
+# ~6 high-contrast series before cycling. Falls back to Plotly defaults if
+# a plot needs more series than we have brand colors for.
+COLOR_SEQUENCE = [
+    "#071D49",  # AbbVie Dark Blue
+    "#0066F5",  # Curious Dark Cobalt
+    "#CF451C",  # Remarkable Dark Red
+    "#338700",  # Global Dark Green
+    "#8A2ECC",  # Purposeful Dark Purple
+    "#9C6B12",  # Dark Copper
+    "#A6B5E0",  # AbbVie Medium Blue
+    "#00A1FF",  # Curious Light Cobalt
+]
 
 
 # ---------------------------------------------------------------------------
@@ -3858,12 +3870,75 @@ def main() -> None:
         },
     )
 
+    # ── AbbVie brand styling ────────────────────────────────────────────────
+    # Light theming pass so the app reads as internal AbbVie tooling rather
+    # than a generic Streamlit demo. Colors mirror .streamlit/config.toml.
+    # Dark Blue #071D49 (primary), Medium Blue #A6B5E0 (accent), Light Blue
+    # #EDF0FF (secondary bg), Dark Gray #4B4C4E (body text).
     st.markdown("""
         <style>
+            /* Layout density + hide default Streamlit chrome */
             .block-container { padding-top: 1.2rem !important; }
             header[data-testid="stHeader"] { display: none; }
-            h1 { margin-bottom: 0.15rem !important; }
-            [data-testid="stCaptionContainer"] { margin-top: -0.25rem; }
+            #MainMenu { visibility: hidden; }
+            footer { visibility: hidden; }
+            [data-testid="stCaptionContainer"] { margin-top: -0.25rem; color: #4B4C4E; }
+
+            /* Clean system font stack — avoids the default Streamlit
+               Source Sans that teammates recognise as "the Streamlit look". */
+            html, body, [class*="css"], .stMarkdown, .stChatMessage {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                             "Helvetica Neue", Arial, sans-serif;
+            }
+
+            /* Titled headers in AbbVie Dark Blue with Medium Blue accent bar */
+            h1 {
+                color: #071D49;
+                margin-bottom: 0.15rem !important;
+                border-bottom: 3px solid #A6B5E0;
+                padding-bottom: 0.35rem;
+                letter-spacing: -0.01em;
+            }
+            h2, h3 { color: #071D49; }
+
+            /* Tab bar */
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 0.25rem;
+                border-bottom: 1px solid #E8E8E8;
+            }
+            .stTabs [data-baseweb="tab"] {
+                color: #4B4C4E;
+                font-weight: 500;
+                padding: 0.5rem 1rem;
+            }
+            .stTabs [data-baseweb="tab"][aria-selected="true"] {
+                color: #071D49;
+                border-bottom-color: #071D49 !important;
+            }
+
+            /* Buttons — primary type uses brand blue; secondary stays light */
+            .stButton > button[kind="primary"],
+            .stDownloadButton > button[kind="primary"] {
+                background-color: #071D49;
+                color: #FFFFFF;
+                border: none;
+            }
+            .stButton > button[kind="primary"]:hover,
+            .stDownloadButton > button[kind="primary"]:hover {
+                background-color: #0a2858;
+                color: #FFFFFF;
+            }
+
+            /* Expanders/cards — subtle light-blue border instead of gray */
+            [data-testid="stExpander"] {
+                border: 1px solid #EDF0FF;
+                border-radius: 6px;
+            }
+
+            /* Chat bubbles slightly softer than default */
+            [data-testid="stChatMessage"] {
+                border-radius: 8px;
+            }
         </style>
     """, unsafe_allow_html=True)
 

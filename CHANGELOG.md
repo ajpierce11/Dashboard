@@ -2,6 +2,18 @@
 
 Notable changes to the Testing Dashboard. Newest at top. Versioning is date-based since there's no semver published.
 
+## 2026-05-13 (later)
+
+### Changed
+- **AbbVie brand theming pass.** Primary color is now AbbVie Dark Blue (`#071D49`), secondary background is Light Blue (`#EDF0FF`), body text is Dark Gray (`#4B4C4E`) per the brand guide. Titles use the brand Dark Blue with a Medium Blue accent bar.
+- **Chart palette** switched from Plotly D3 to AbbVie brand colors — Dark Blue, Dark Cobalt, Dark Red, Dark Green, Dark Purple, Dark Copper (and two lighter blues as fallback). Cleaner and consistent with company visual identity.
+- **Typography** uses a system font stack instead of Streamlit's default Source Sans, removing the most recognisable "Streamlit app" tell.
+- **Chrome cleanup** — hid the hamburger menu and "Made with Streamlit" footer so the app reads as internal tooling.
+- Tab bar, buttons, and expanders restyled to match the brand palette.
+
+### Known gap
+- No AbbVie logo in the header yet. To add one: drop `assets/logo.png` (or `.svg`) in the repo root and let me know — I'll wire it into `main()`.
+
 ## 2026-05-13
 
 ### Added

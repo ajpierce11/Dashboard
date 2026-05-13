@@ -2400,6 +2400,49 @@ STUDY_FULLTEXT_CHAR_CAP = 70000
 USER_MSG_CHAR_BUDGET = 600000
 
 
+def _index_build_preflight(vs: VectorStore | None) -> str:
+    """
+    Summary line shown above the Build/Update buttons so the admin can see
+    scope before clicking. Rough throughput estimate (~2 docs/sec via ILIAD)
+    is deliberately conservative so users don't get impatient when it takes
+    longer.
+    """
+    index_path = Path(LIBRARY_PATH) / "library_index.json"
+    if not index_path.exists():
+        return ""
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            entries_all = json.load(f).get("entries", [])
+    except Exception:
+        return ""
+    live = [e for e in entries_all if not e.get("deleted")]
+    total_docs = len(live)
+
+    if vs is not None and vs.is_built():
+        indexed_ids = {m.get("entry_id") for m in (vs._metadata or [])}
+        new_docs = sum(1 for e in live if e.get("id") not in indexed_ids)
+        removed = sum(
+            1 for eid in indexed_ids if eid and eid not in {e.get("id") for e in live}
+        )
+        if new_docs == 0 and removed == 0:
+            return f"Index is already in sync with the library ({total_docs} documents)."
+        secs = max(5, new_docs * 2)
+        mins = secs // 60
+        eta = f"~{mins} min" if mins >= 1 else f"~{secs} s"
+        return (
+            f"Update will embed **{new_docs}** new document(s), remove "
+            f"**{removed}**. Estimated time: {eta}."
+        )
+
+    secs = total_docs * 2
+    mins = max(1, secs // 60)
+    return (
+        f"Full build will embed **{total_docs}** documents. "
+        f"Estimated time: ~{mins} minute(s). Leave the tab open — "
+        "progress bar updates live."
+    )
+
+
 @st.cache_resource(show_spinner=False, max_entries=64)
 def _cached_extract_text_impl(filepath: str, mtime: float) -> str:
     from doc_text import extract_text
@@ -2917,11 +2960,19 @@ def render_report_generator() -> None:
 
     vs: VectorStore | None = st.session_state.get("ai_vector_store")
     if vs is None or not vs.is_built():
-        st.warning(
-            "The vector index hasn't been built yet. Go to the **AI Assistant** "
-            "tab and click **Build document index** first — the Report Generator "
-            "uses the same index to find relevant prior studies."
-        )
+        if auth.is_admin():
+            st.warning(
+                "The vector index hasn't been built yet. Go to the **AI Assistant** "
+                "tab and click **Build document index** first — the Report Generator "
+                "uses the same index to find relevant prior studies."
+            )
+        else:
+            st.warning(
+                "The vector index hasn't been built yet — the Report Generator "
+                f"needs it to find relevant prior studies. Ask {auth.admin_contact()} "
+                "to build it from the AI Assistant tab."
+            )
+        return
 
     # ── Upload ──────────────────────────────────────────────────────────────
     uploaded_files = st.file_uploader(
@@ -3317,6 +3368,11 @@ def render_ai_assistant(
         elif not iliad_client.get_api_key():
             st.error("ILIAD_API_KEY is not set, so the index cannot be built or updated.")
         else:
+            # Pre-flight: show the admin what they're about to do so they
+            # don't think the app froze halfway through a 10-minute embed.
+            _preflight = _index_build_preflight(vs)
+            if _preflight:
+                st.caption(_preflight)
             col_update, col_full = st.columns(2)
             with col_update:
                 update_label = "⚡ Update index (new files only)" if vs_built else "⚡ Build document index"
@@ -3600,12 +3656,35 @@ def main() -> None:
             "Check that the network drive is mounted and the path is correct."
         )
         st.stop()
-    except Exception as e:
+    except PermissionError:
         st.error(
-            f"Could not load data from `{FILE_PATH}`:\n\n`{e}`\n\n"
-            "Confirm the workbook matches the expected column layout "
-            "(Product, 6 timepoints, 6 SDs, Reference, 5 property columns)."
+            "The workbook is currently open on someone else's machine and "
+            f"is locked for editing:\n\n`{FILE_PATH}`\n\n"
+            "Close it in Excel (or ask the other person to close it), "
+            "then click **↻ Reload data** in the Product Comparator tab."
         )
+        if st.button("↻ Retry now", key="retry_locked_workbook"):
+            st.cache_data.clear()
+            st.session_state.pop("ai_data_context", None)
+            st.rerun()
+        st.stop()
+    except Exception as e:
+        # BadZipFile (partial save) and OSError (network hiccup) land here.
+        # Show a short friendly message up top and the technical detail below.
+        import zipfile
+        if isinstance(e, zipfile.BadZipFile):
+            st.error(
+                "The workbook looks partially saved or corrupted. If someone "
+                "just finished editing, wait a few seconds and reload."
+            )
+        else:
+            st.error(
+                f"Could not load data from `{FILE_PATH}`. Confirm the workbook "
+                "matches the expected column layout (Product, 6 timepoints, "
+                "6 SDs, Reference, 5 property columns)."
+            )
+        with st.expander("Technical detail"):
+            st.code(f"{type(e).__name__}: {e}")
         st.stop()
 
     products = sorted(df["Product"].unique().tolist())

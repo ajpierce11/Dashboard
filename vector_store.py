@@ -14,6 +14,7 @@ Usage:
 """
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -106,19 +107,51 @@ class VectorStore:
         self._vectors: np.ndarray | None = None   # shape (N, EMBED_DIM)
         self._metadata: list[dict]       = []     # parallel list of chunk metadata
 
+        # mtime of the .npz at the time of last successful _load(). Used by
+        # reload_if_changed() so other users' sessions pick up an admin's
+        # rebuild without restarting the app.
+        self._loaded_mtime: float = 0.0
+
     # ── Persistence ──────────────────────────────────────────────────────────
 
     def _save(self) -> None:
-        """Save vectors and metadata to disk."""
+        """
+        Persist vectors and metadata atomically.
+
+        Writes to a sibling .tmp file and then os.replaces it onto the real
+        filename — a reader hitting the file mid-write either sees the old
+        contents or the new contents, never a truncated .npz. Without this,
+        a mid-save crash (or a second writer) leaves the file in a partial
+        state that every subsequent load() reports as "corrupted".
+
+        Also stamps the index's last_updated timestamp into the archive
+        so needs_rebuild() can compare logical versions instead of
+        filesystem mtimes (which change on every sync even when nothing
+        content-wise changed).
+        """
         if self._vectors is None or len(self._vectors) == 0:
             return
+
+        index_stamp = ""
+        try:
+            if self.index_file.exists():
+                with open(self.index_file, "r", encoding="utf-8") as f:
+                    index_stamp = json.load(f).get("last_updated", "")
+        except Exception:
+            pass
+
+        tmp_file = self.vector_file.with_suffix(
+            self.vector_file.suffix + ".tmp"
+        )
         np.savez_compressed(
-            str(self.vector_file),
+            str(tmp_file),
             vectors=self._vectors,
             metadata=np.array(
                 [json.dumps(m) for m in self._metadata], dtype=object
             ),
+            index_stamp=np.array([index_stamp], dtype=object),
         )
+        os.replace(str(tmp_file), str(self.vector_file))
 
     def _load(self) -> bool:
         """Load vectors and metadata from disk. Returns True if successful."""
@@ -128,9 +161,30 @@ class VectorStore:
             data = np.load(str(self.vector_file), allow_pickle=True)
             self._vectors  = data["vectors"]
             self._metadata = [json.loads(m) for m in data["metadata"]]
+            try:
+                self._loaded_mtime = self.vector_file.stat().st_mtime
+            except OSError:
+                self._loaded_mtime = 0.0
             return True
         except Exception:
             return False
+
+    def reload_if_changed(self) -> bool:
+        """
+        Called before each search. Re-reads the npz when the file on disk
+        has been rewritten since we last loaded it — picks up the admin's
+        rebuild in other users' sessions without forcing a restart.
+        Returns True if the in-memory copy was refreshed.
+        """
+        if not self.vector_file.exists():
+            return False
+        try:
+            disk_mtime = self.vector_file.stat().st_mtime
+        except OSError:
+            return False
+        if disk_mtime > self._loaded_mtime + 0.01:
+            return self._load()
+        return False
 
     def is_built(self) -> bool:
         return self.vector_file.exists()
@@ -262,6 +316,10 @@ class VectorStore:
         if self._vectors is None:
             if not self._load():
                 return []
+        else:
+            # Another session (admin) may have rebuilt the index on disk
+            # since we last loaded. Cheap stat check before every search.
+            self.reload_if_changed()
 
         if self._vectors is None or len(self._vectors) == 0:
             return []
@@ -374,16 +432,38 @@ class VectorStore:
 
     def needs_rebuild(self) -> bool:
         """
-        Return True if the vector store is older than the library index,
-        meaning new documents have been added since the last build.
+        True when the vector store's baked-in index_stamp is older than the
+        library index's current last_updated. Compares logical versions,
+        not filesystem mtimes — a Sync touches the index file even when
+        content is unchanged, so an mtime comparison would always say
+        "rebuild needed" and teach users to ignore the warning.
         """
         if not self.vector_file.exists():
             return True
         if not self.index_file.exists():
             return False
-        return (
-            self.vector_file.stat().st_mtime < self.index_file.stat().st_mtime
-        )
+
+        try:
+            with open(self.index_file, "r", encoding="utf-8") as f:
+                current_stamp = json.load(f).get("last_updated", "")
+        except Exception:
+            return False
+
+        try:
+            data = np.load(str(self.vector_file), allow_pickle=True)
+            stored_stamp = ""
+            if "index_stamp" in data.files:
+                raw = data["index_stamp"]
+                if raw.size:
+                    stored_stamp = str(raw[0])
+        except Exception:
+            return False
+
+        # No stamp means the store predates this field — fall back to mtime
+        # so existing installs still get a one-time rebuild prompt.
+        if not stored_stamp:
+            return self.vector_file.stat().st_mtime < self.index_file.stat().st_mtime
+        return stored_stamp != current_stamp
 
     def update(self, progress_callback=None) -> dict:
         """

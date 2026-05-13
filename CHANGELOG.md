@@ -5,6 +5,11 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 ## 2026-05-13
 
 ### Added
+- **🔬 Insights tab** with four analytical features built on the AI-metadata cache:
+  - **Coverage gaps** — ranked list of (product, missing model) pairs where a well-studied product has never been tested in a given model. Deterministic analytics — no LLM calls, no surprises.
+  - **Methodology navigator** — every endpoint measured across the library with study counts and a drill-in that lists each study (product + model + timepoints) that measured it. Useful for "how have we measured X before."
+  - **Suggest next experiments** (AI-powered) — Claude reads the coverage matrix + top gaps and proposes 3–5 strategic experiments with hypotheses, models, and endpoints. Tailored to the pre-clinical dermal filler program.
+  - **Metadata filters on AI Assistant** — multiselect for product / model / endpoint gates all retrieval (fulltext, vector, keyword fallback) so questions stay scoped. "Methods we've used for collagen endpoints in rat models" only pulls matching studies.
 - **🧠 AI metadata enrichment layer** — new `ai_metadata.py` module walks the library and has the LLM extract structured scientific fields (product, model, endpoints, timepoints) per study, cached in `Library/library_ai_metadata.json`. Runs incrementally — only new/changed studies are re-processed — so subsequent refreshes are seconds. Sits alongside `library_index.json` and `library_vectors.npz` without replacing either.
 - **🗺 Coverage matrix** on the Home tab — heatmap of studies by product × model, built from the AI metadata. Makes "where have we looked, and where haven't we?" a glanceable question. Includes a raw-extraction view so admins can spot-check the AI's tagging.
 - **🏠 Home tab** — new first tab with recent library additions (last 14 days), data freshness across workbook / index / vectors, and a welcome line. Replaces "open each tab to see what's there" with a glanceable landing page.

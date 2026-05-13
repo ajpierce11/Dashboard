@@ -426,6 +426,10 @@ class VectorStore:
                 "category": best_meta["category"],
                 "text":     merged[:40000],
                 "score":    base_scores[base],
+                # All entry_ids that contributed chunks to this result.
+                # Downstream callers (e.g. the AI Assistant's metadata
+                # filter) use this to keep or drop the result.
+                "entry_ids": sorted(by_entry.keys()),
             })
 
         return results

@@ -2610,11 +2610,12 @@ def _retrieve_library_context(question: str) -> list[dict]:
     results: list[dict] = []
     for score, entry in deduped:
         results.append({
-            "title":    entry.get("display_name") or entry.get("title", ""),
-            "category": entry.get("category", ""),
-            "text":     entry.get("preview", ""),
-            "score":    float(score),
-            "source":   "keyword",
+            "title":     entry.get("display_name") or entry.get("title", ""),
+            "category":  entry.get("category", ""),
+            "text":      entry.get("preview", ""),
+            "score":     float(score),
+            "source":    "keyword",
+            "entry_ids": [entry.get("id", "")] if entry.get("id") else [],
         })
     return results
 
@@ -2778,11 +2779,12 @@ def _retrieve_study_fulltext(question: str) -> list[dict]:
             combined = combined[:STUDY_FULLTEXT_CHAR_CAP] + "\n\n[... truncated ...]"
 
         matched.append({
-            "title":    entry.get("display_name") or entry.get("title", ""),
-            "category": entry.get("category", ""),
-            "text":     combined,
-            "score":    1.0,
-            "source":   "fulltext",
+            "title":     entry.get("display_name") or entry.get("title", ""),
+            "category":  entry.get("category", ""),
+            "text":      combined,
+            "score":     1.0,
+            "source":    "fulltext",
+            "entry_ids": [entry.get("id", "")] if entry.get("id") else [],
         })
 
     return matched
@@ -3680,6 +3682,72 @@ def _conversation_as_markdown(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _matching_entry_ids(
+    products: list[str] | None = None,
+    models: list[str] | None = None,
+    endpoints: list[str] | None = None,
+) -> set[str]:
+    """
+    Set of entry_ids in the AI-metadata cache that match ALL supplied
+    filters. Empty list for a dimension = no filter on that dimension.
+    Returns the set of ALL entry_ids if no filters are supplied, so
+    callers can check `if filters: ids = _matching_entry_ids(...)`.
+    """
+    meta = ai_metadata.load_entries_keyed(LIBRARY_PATH)
+    matched: set[str] = set()
+    p_lower = {p.lower() for p in (products or [])}
+    m_lower = {m.lower() for m in (models or [])}
+    e_lower = {e.lower() for e in (endpoints or [])}
+
+    for eid, rec in meta.items():
+        if not rec.get("ok", False) or rec.get("note") == "no_text":
+            continue
+
+        if p_lower:
+            rec_products = {
+                s.strip().lower() for s in (rec.get("product", "") or "").split(",")
+                if s.strip()
+            }
+            if not (p_lower & rec_products):
+                continue
+        if m_lower:
+            if (rec.get("model", "") or "").strip().lower() not in m_lower:
+                continue
+        if e_lower:
+            rec_endpoints = {ep.strip().lower() for ep in (rec.get("endpoints", []) or [])}
+            if not (e_lower & rec_endpoints):
+                continue
+        matched.add(eid)
+    return matched
+
+
+def _filter_options() -> dict:
+    """Distinct values for each filterable dimension. Drives the multiselects."""
+    meta = ai_metadata.load_entries_keyed(LIBRARY_PATH)
+    products: set[str] = set()
+    models:   set[str] = set()
+    endpoints: set[str] = set()
+    for rec in meta.values():
+        if not rec.get("ok", False) or rec.get("note") == "no_text":
+            continue
+        for p in (rec.get("product", "") or "").split(","):
+            p = p.strip()
+            if p:
+                products.add(p)
+        m = (rec.get("model", "") or "").strip()
+        if m:
+            models.add(m)
+        for ep in (rec.get("endpoints", []) or []):
+            ep = ep.strip()
+            if ep:
+                endpoints.add(ep)
+    return {
+        "products":  sorted(products),
+        "models":    sorted(models),
+        "endpoints": sorted(endpoints),
+    }
+
+
 def _starter_prompts(df: pd.DataFrame, products: list[str]) -> list[str]:
     """
     Build the "Try asking" examples from the live dataset + index so they
@@ -3925,6 +3993,53 @@ def render_ai_assistant(
                     # highlighter's default colors clashed with the brand dark theme.
                     st.code(msg["content"], language=None)
 
+    # ── Metadata filters ─────────────────────────────────────────────────────
+    # Gate retrieval by AI-extracted metadata so questions like "methods
+    # we've used for collagen endpoints" stay scoped instead of pulling
+    # unrelated studies that happen to mention collagen. Filters stick
+    # across messages in the same session.
+    _opts = _filter_options()
+    with st.expander("🔎 Narrow by metadata (optional)", expanded=False):
+        st.caption(
+            "Limit the documents the AI can retrieve from. Useful for "
+            "focused questions (\"methods we've used for X in rats\"). "
+            "Leave blank to search the whole library."
+        )
+        f_cols = st.columns(3)
+        with f_cols[0]:
+            filt_products = st.multiselect(
+                "Product(s)", options=_opts["products"],
+                default=st.session_state.get("ai_filter_products", []),
+                key="ai_filter_products",
+            )
+        with f_cols[1]:
+            filt_models = st.multiselect(
+                "Model(s)", options=_opts["models"],
+                default=st.session_state.get("ai_filter_models", []),
+                key="ai_filter_models",
+            )
+        with f_cols[2]:
+            filt_endpoints = st.multiselect(
+                "Endpoint(s)", options=_opts["endpoints"],
+                default=st.session_state.get("ai_filter_endpoints", []),
+                key="ai_filter_endpoints",
+            )
+        if filt_products or filt_models or filt_endpoints:
+            matched = _matching_entry_ids(
+                products=filt_products,
+                models=filt_models,
+                endpoints=filt_endpoints,
+            )
+            st.caption(
+                f"Filters match **{len(matched)}** study(ies) out of the "
+                f"AI-metadata cache. Retrieval will be restricted to those."
+            )
+            if not matched:
+                st.warning(
+                    "No studies match these filters. Clear one or more "
+                    "to avoid an empty retrieval."
+                )
+
     # ── Starter prompts (empty state) ────────────────────────────────────────
     if not st.session_state["ai_messages"]:
         with st.container(border=True):
@@ -3986,27 +4101,65 @@ def render_ai_assistant(
                     _retrieve_study_fulltext(question) if has_study_num else []
                 )
 
+                # Apply metadata filters if any are set in the filter panel.
+                # Filters gate *all* retrieval sources (fulltext, vector,
+                # keyword fallback) so the AI can't cite something outside
+                # the user's chosen scope.
+                active_filters = bool(
+                    st.session_state.get("ai_filter_products")
+                    or st.session_state.get("ai_filter_models")
+                    or st.session_state.get("ai_filter_endpoints")
+                )
+                allowed_ids: set[str] | None = None
+                if active_filters:
+                    allowed_ids = _matching_entry_ids(
+                        products=st.session_state.get("ai_filter_products", []),
+                        models=st.session_state.get("ai_filter_models", []),
+                        endpoints=st.session_state.get("ai_filter_endpoints", []),
+                    )
+                    st.write(
+                        f"Metadata filters active — scope: {len(allowed_ids)} "
+                        f"study(ies)."
+                    )
+
+                def _apply_filter(items: list[dict]) -> list[dict]:
+                    if allowed_ids is None:
+                        return items
+                    return [
+                        c for c in items
+                        if any(eid in allowed_ids for eid in c.get("entry_ids", []))
+                    ]
+
                 if (is_followup or is_short_conversational) and not has_study_num and "ai_last_doc_chunks" in st.session_state:
                     st.write("Reusing last retrieved documents (follow-up question)…")
                     chunks = st.session_state["ai_last_doc_chunks"]
                 elif vs_instance is not None and vs_instance.is_built():
+                    # When filters are active, pull a wider candidate pool
+                    # so we still return enough after filtering.
                     if fulltext_chunks:
                         top_k = 5
                     elif has_study_num:
                         top_k = 12
                     else:
                         top_k = 25
+                    if active_filters:
+                        top_k = min(top_k * 2, 60)
                     st.write(f"Searching library index (top {top_k} matches)…")
                     chunks = vs_instance.search(question, top_k=top_k)
+                    chunks = _apply_filter(chunks)
+                    fulltext_chunks = _apply_filter(fulltext_chunks)
                     if fulltext_chunks:
                         ft_titles = {c["title"] for c in fulltext_chunks}
                         chunks = [c for c in chunks if c["title"] not in ft_titles]
                     if not chunks and not fulltext_chunks:
-                        chunks = _retrieve_library_context(question)
+                        kw = _retrieve_library_context(question)
+                        chunks = _apply_filter(kw)
                     st.session_state["ai_last_doc_chunks"] = fulltext_chunks + chunks
                 else:
                     st.write("Vector index not built — falling back to keyword search…")
-                    chunks = _retrieve_library_context(question)
+                    kw = _retrieve_library_context(question)
+                    chunks = _apply_filter(kw)
+                    fulltext_chunks = _apply_filter(fulltext_chunks)
                     st.session_state["ai_last_doc_chunks"] = fulltext_chunks + chunks
 
                 sections: list[str] = []

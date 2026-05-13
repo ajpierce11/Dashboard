@@ -25,6 +25,7 @@ from datetime import datetime
 
 from config import FILE_PATH, LIBRARY_PATH
 from title_utils import base_title, clean_stem as _shared_clean_stem, display_title_from_filename
+import auth
 
 STATIC_PROPERTIES = [
     "HA Concentration (mg/mL)",
@@ -1991,25 +1992,35 @@ def render_library() -> None:
     """Render the full document library UI."""
 
     # ── Header row ──────────────────────────────────────────────────────────
-    h_col, sync_col, rebuild_col = st.columns([4, 1, 1])
-    with h_col:
+    admin = auth.is_admin()
+    if admin:
+        h_col, sync_col, rebuild_col = st.columns([4, 1, 1])
+        with h_col:
+            st.subheader("Document Library")
+            st.caption(f"Library folder: `{LIBRARY_PATH}`")
+        with sync_col:
+            st.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
+            if st.button("⚡ Sync", use_container_width=True,
+                         help="Process only new, modified, or deleted files since the last scan. Fast — use this after adding/removing files."):
+                _incremental_scan_update()
+                st.rerun()
+        with rebuild_col:
+            st.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
+            if st.button("↻ Rebuild", use_container_width=True,
+                         help="Full rebuild from scratch. Slower — use only if the index is corrupted or classification rules changed."):
+                _run_scan_with_progress()
+                st.rerun()
+    else:
         st.subheader("Document Library")
         st.caption(f"Library folder: `{LIBRARY_PATH}`")
-    with sync_col:
-        st.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
-        if st.button("⚡ Sync", use_container_width=True,
-                     help="Process only new, modified, or deleted files since the last scan. Fast — use this after adding/removing files."):
-            _incremental_scan_update()
-            st.rerun()
-    with rebuild_col:
-        st.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
-        if st.button("↻ Rebuild", use_container_width=True,
-                     help="Full rebuild from scratch. Slower — use only if the index is corrupted or classification rules changed."):
-            _run_scan_with_progress()
-            st.rerun()
+        st.info(
+            f"Library maintenance is admin-only. If a document is missing or "
+            f"looks out of date, ask {auth.admin_contact()} to run a Sync."
+        )
 
-    # ── Organize library tool ───────────────────────────────────────────────
-    _render_organize_section()
+    # ── Organize library tool (admin only — moves files on the shared drive) ─
+    if admin:
+        _render_organize_section()
 
     # ── Folder check ────────────────────────────────────────────────────────
     if not Path(LIBRARY_PATH).exists():
@@ -2095,19 +2106,25 @@ def render_library() -> None:
             if index_last_updated:
                 st.caption(f"Index last updated: {index_last_updated}")
 
-            col_sync, col_rebuild = st.columns(2)
-            with col_sync:
-                if st.button("⚡ Sync (incremental)", key="mismatch_sync",
-                             use_container_width=True,
-                             help="Process only new, modified, or deleted files. Fast."):
-                    _incremental_scan_update()
-                    st.rerun()
-            with col_rebuild:
-                if st.button("↻ Full rescan", key="force_rescan",
-                             use_container_width=True,
-                             help="Rebuild the whole index from scratch. Slower."):
-                    _run_scan_with_progress()
-                    st.rerun()
+            if admin:
+                col_sync, col_rebuild = st.columns(2)
+                with col_sync:
+                    if st.button("⚡ Sync (incremental)", key="mismatch_sync",
+                                 use_container_width=True,
+                                 help="Process only new, modified, or deleted files. Fast."):
+                        _incremental_scan_update()
+                        st.rerun()
+                with col_rebuild:
+                    if st.button("↻ Full rescan", key="force_rescan",
+                                 use_container_width=True,
+                                 help="Rebuild the whole index from scratch. Slower."):
+                        _run_scan_with_progress()
+                        st.rerun()
+            else:
+                st.caption(
+                    f"Reindexing is admin-only — ask {auth.admin_contact()} "
+                    f"to sync the library."
+                )
 
     library = load_library(LIBRARY_PATH)
     total   = sum(len(v) for v in library.values())
@@ -3252,6 +3269,7 @@ def render_ai_assistant(
         )
 
     # ── Vector store status + build controls ─────────────────────────────────
+    admin = auth.is_admin()
     with st.expander(
         "📚 Document index" + (" ✅" if vs_built else " ⚠️ Not built"),
         expanded=not vs_built,
@@ -3268,67 +3286,87 @@ def render_ai_assistant(
                 f"**{chunk_count:,}** chunks. Built **{built_at}**."
             )
             if vs and vs.needs_rebuild():
-                st.warning("Library has been updated since the index was built — consider rebuilding.")
-        else:
-            st.info(
-                "The document index has not been built yet. "
-                "Click below to embed all library documents for semantic search. "
-                "This takes a few minutes but only needs to be done once "
-                "(or when new documents are added)."
-            )
-
-        col_update, col_full = st.columns(2)
-        with col_update:
-            update_label = "⚡ Update index (new files only)" if vs_built else "⚡ Build document index"
-            if st.button(update_label, use_container_width=True, key="ai_update_vs",
-                         disabled=not iliad_client.get_api_key()):
-                new_vs = VectorStore(LIBRARY_PATH, iliad_client.get_api_key())
-                if vs_built:
-                    new_vs._load()
-                progress = st.progress(0, text="Starting…")
-                def _cb(done, total, msg):
-                    pct = int(done / max(total, 1) * 100)
-                    progress.progress(pct, text=msg)
-                with st.spinner("Updating index…"):
-                    result = new_vs.update(progress_callback=_cb) if vs_built else new_vs.build(progress_callback=_cb)
-                progress.empty()
-                if "error" in result:
-                    st.error(result["error"])
+                if admin:
+                    st.warning(
+                        "Library has been updated since the index was built — "
+                        "consider running Update index."
+                    )
                 else:
-                    if vs_built:
-                        st.success(
-                            f"Updated: {result.get('new_documents', 0)} new documents, "
-                            f"{result.get('removed', 0)} removed."
-                        )
-                    else:
-                        st.success(
-                            f"Index built: {result['chunks']} chunks from "
-                            f"{result['documents']} documents."
-                            + (f" ({result['errors']} errors)" if result['errors'] else "")
-                        )
-                    st.session_state["ai_vector_store"] = new_vs
-                    st.rerun()
-        with col_full:
-            if vs_built:
-                if st.button("🔄 Full rebuild", use_container_width=True, key="ai_build_vs",
-                             disabled=not iliad_client.get_api_key(),
-                             help="Re-embed everything from scratch. Use if document content has changed."):
+                    st.info(
+                        f"Library has been updated since the index was built. "
+                        f"Ask {auth.admin_contact()} to run Update index when convenient."
+                    )
+        else:
+            if admin:
+                st.info(
+                    "The document index has not been built yet. "
+                    "Click below to embed all library documents for semantic search. "
+                    "This takes a few minutes but only needs to be done once "
+                    "(or when new documents are added)."
+                )
+            else:
+                st.warning(
+                    "The document index has not been built yet. "
+                    "AI search quality will be reduced until "
+                    f"{auth.admin_contact()} builds it."
+                )
+
+        # Non-admins see status only — no build buttons.
+        if not admin:
+            pass
+        elif not iliad_client.get_api_key():
+            st.error("ILIAD_API_KEY is not set, so the index cannot be built or updated.")
+        else:
+            col_update, col_full = st.columns(2)
+            with col_update:
+                update_label = "⚡ Update index (new files only)" if vs_built else "⚡ Build document index"
+                if st.button(update_label, use_container_width=True, key="ai_update_vs"):
                     new_vs = VectorStore(LIBRARY_PATH, iliad_client.get_api_key())
+                    if vs_built:
+                        new_vs._load()
                     progress = st.progress(0, text="Starting…")
-                    def _cb2(done, total, msg):
+                    def _cb(done, total, msg):
                         pct = int(done / max(total, 1) * 100)
                         progress.progress(pct, text=msg)
-                    with st.spinner("Rebuilding full index…"):
-                        result = new_vs.build(progress_callback=_cb2)
+                    with st.spinner("Updating index…"):
+                        result = new_vs.update(progress_callback=_cb) if vs_built else new_vs.build(progress_callback=_cb)
                     progress.empty()
                     if "error" in result:
                         st.error(result["error"])
                     else:
-                        st.success(
-                            f"Rebuilt: {result['chunks']} chunks from {result['documents']} documents."
-                        )
+                        if vs_built:
+                            st.success(
+                                f"Updated: {result.get('new_documents', 0)} new documents, "
+                                f"{result.get('removed', 0)} removed."
+                            )
+                        else:
+                            st.success(
+                                f"Index built: {result['chunks']} chunks from "
+                                f"{result['documents']} documents."
+                                + (f" ({result['errors']} errors)" if result['errors'] else "")
+                            )
                         st.session_state["ai_vector_store"] = new_vs
                         st.rerun()
+            with col_full:
+                if vs_built:
+                    if st.button("🔄 Full rebuild", use_container_width=True, key="ai_build_vs",
+                                 help="Re-embed everything from scratch. Use if document content has changed."):
+                        new_vs = VectorStore(LIBRARY_PATH, iliad_client.get_api_key())
+                        progress = st.progress(0, text="Starting…")
+                        def _cb2(done, total, msg):
+                            pct = int(done / max(total, 1) * 100)
+                            progress.progress(pct, text=msg)
+                        with st.spinner("Rebuilding full index…"):
+                            result = new_vs.build(progress_callback=_cb2)
+                        progress.empty()
+                        if "error" in result:
+                            st.error(result["error"])
+                        else:
+                            st.success(
+                                f"Rebuilt: {result['chunks']} chunks from {result['documents']} documents."
+                            )
+                            st.session_state["ai_vector_store"] = new_vs
+                            st.rerun()
 
     if "ai_messages" not in st.session_state:
         st.session_state["ai_messages"] = []

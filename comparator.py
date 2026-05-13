@@ -4772,6 +4772,47 @@ def _render_coverage_matrix() -> None:
         st.dataframe(sample, use_container_width=True, height=300)
 
 
+_SUGGEST_EXPERIMENTS_SYSTEM_PROMPT = """You are a senior scientific advisor to AbbVie's pre-clinical dermal-filler research team. The team develops HA-based fillers (Juvederm family, Voluma, etc.) and next-generation HA+biostimulatory/regenerative formulations. They test in vitro, ex vivo (skin), and in vivo (rat/mouse/other) models to understand lift, biostimulation, regenerative effect, collagen response, and material mechanics.
+
+You will be given a compact summary of the team's study coverage — a matrix of product × model study counts, plus identified coverage gaps. From that, propose 3–5 concrete high-leverage next experiments.
+
+For each suggestion, output:
+- **Title** — short, specific
+- **Hypothesis** — what we'd learn or test
+- **Why now** — which gap or pattern motivates it (reference the coverage data)
+- **Suggested model & endpoints** — be specific
+- **Expected effort** — a rough sense of scope (single timepoint / multi-timepoint / cross-product)
+
+Prefer experiments that:
+1. Close a coverage gap in a well-studied product (fast de-risking)
+2. Bridge an internal finding with a next-gen formulation question (maximum strategic value)
+3. Build methodological confidence for a capability the team wants long-term
+
+Avoid generic suggestions that could apply to any dermal filler program. Reference specific products and models from the data. If the data is thin, say so honestly rather than padding with platitudes.
+
+Format the entire response in markdown with H3 headings for each suggestion."""
+
+
+def _ai_suggest_experiments(coverage_text: str) -> str:
+    """
+    Send the coverage summary to the LLM and stream back strategic
+    experiment suggestions. Returns the full response text for display.
+    """
+    messages = [
+        {"role": "system", "content": _SUGGEST_EXPERIMENTS_SYSTEM_PROMPT},
+        {"role": "user",   "content": (
+            "Here is the current library's coverage summary. Suggest "
+            "3-5 next experiments per the instructions.\n\n" + coverage_text
+        )},
+    ]
+    try:
+        return "".join(_call_iliad_nonstreaming(
+            messages, max_tokens=2000, timeout=120,
+        ))
+    except Exception as e:
+        return f"⚠️ Suggestion call failed: {type(e).__name__}: {e}"
+
+
 def render_insights() -> None:
     """
     Analytical views over the AI-extracted metadata cache. Everything
@@ -4863,6 +4904,54 @@ def render_insights() -> None:
                     f"**{len(detail)} study row(s)** measured _{endpoint_pick}_:"
                 )
                 st.dataframe(detail, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── AI: suggest next experiments ─────────────────────────────────────
+    st.markdown("### 🧭 Suggest next experiments")
+    st.caption(
+        "Claude reads the coverage matrix + top gaps and proposes 3–5 "
+        "concrete experiments with hypotheses, models, and endpoints. "
+        "This is a strategic brainstorm, not a rubber-stamp — review "
+        "each suggestion critically and dismiss anything that doesn't "
+        "fit the current roadmap."
+    )
+
+    if not iliad_client.get_api_key():
+        st.info("ILIAD_API_KEY is not set, so AI suggestions are unavailable.")
+    else:
+        # Cache the last suggestion per-session so accidental reruns don't
+        # cost another LLM call.
+        existing = st.session_state.get("insights_suggestions")
+        col_btn, col_clear = st.columns([1, 1])
+        with col_btn:
+            if st.button("🧭 Generate suggestions",
+                         use_container_width=True, key="insights_suggest_btn"):
+                matrix = insights.coverage_matrix(rows)
+                cov_text = insights.coverage_summary_text(matrix, gaps)
+                with st.spinner("Thinking… (can take 30–60s for a longer reply)"):
+                    reply = _ai_suggest_experiments(cov_text)
+                st.session_state["insights_suggestions"] = {
+                    "generated_at": datetime.now().isoformat(),
+                    "text":         reply,
+                }
+                st.rerun()
+        with col_clear:
+            if existing and st.button(
+                "🗑 Clear suggestions", use_container_width=True,
+                key="insights_suggest_clear"
+            ):
+                st.session_state.pop("insights_suggestions", None)
+                st.rerun()
+
+        if existing:
+            try:
+                ts = datetime.fromisoformat(existing["generated_at"])
+                st.caption(f"Generated {_format_relative(ts)}.")
+            except Exception:
+                pass
+            with st.container(border=True):
+                st.markdown(existing["text"])
 
 
 def render_home(

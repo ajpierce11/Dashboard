@@ -515,6 +515,7 @@ def build_excel_export(
 # Statistical tests
 # ---------------------------------------------------------------------------
 
+@st.cache_data(show_spinner=False)
 def run_pairwise_ttests(
     pivot_avg: pd.DataFrame,
     pivot_std: pd.DataFrame,
@@ -549,6 +550,7 @@ def run_pairwise_ttests(
     return results
 
 
+@st.cache_data(show_spinner=False)
 def run_anova(
     filtered: pd.DataFrame,
     selected_products: list[str],
@@ -573,6 +575,7 @@ def run_anova(
     return pd.DataFrame(rows)
 
 
+@st.cache_data(show_spinner=False)
 def run_fisher_overall(
     pivot_avg: pd.DataFrame,
     pivot_std: pd.DataFrame,
@@ -1953,6 +1956,14 @@ def render_doc_card(group: dict, card_key: str) -> None:
                 f"background:var(--color-background-info);"
                 f"color:var(--color-text-info);padding:2px 7px;"
                 f"border-radius:10px'>🔄 {n_versions} revisions</span>"
+            )
+        # ✨ badge when the most-recent file mtime is within the last 7 days.
+        # Helps teammates spot freshly-added material at a glance.
+        if _is_recent(group.get("modified", ""), days=7):
+            title_md += (
+                f" &nbsp;<span style='font-size:11px;"
+                f"background:#A6B5E0;color:#071D49;padding:2px 7px;"
+                f"border-radius:10px;font-weight:600'>✨ New</span>"
             )
         st.markdown(title_md, unsafe_allow_html=True)
         st.caption(f"📅 {group['modified']}")
@@ -3867,6 +3878,132 @@ def _render_sources(sources: list[dict]) -> None:
     st.markdown(header + "\n" + "\n".join(lines))
 
 # ---------------------------------------------------------------------------
+# Header + sidebar helpers
+# ---------------------------------------------------------------------------
+
+def _is_recent(modified_str: str, days: int = 7) -> bool:
+    """
+    True when the given modified-date string (as stored on library
+    entries) is within `days` of now. Accepts both ISO datetime strings
+    and bare 'YYYY-MM-DD'. Returns False on parse failures so we never
+    label a file as New on the strength of a bad timestamp.
+    """
+    if not modified_str:
+        return False
+    for fmt_fn in (
+        lambda s: datetime.fromisoformat(s),
+        lambda s: datetime.strptime(s, "%Y-%m-%d"),
+        lambda s: datetime.strptime(s[:10], "%Y-%m-%d"),
+    ):
+        try:
+            ts = fmt_fn(modified_str)
+            return (datetime.now() - ts).days <= days
+        except (ValueError, TypeError):
+            continue
+    return False
+
+
+def _format_relative(ts: datetime | None) -> str:
+    """Human-friendly 'N minutes ago' / '2 days ago' string."""
+    if ts is None:
+        return "unknown"
+    delta = datetime.now() - ts
+    secs = int(delta.total_seconds())
+    if secs < 60:
+        return "just now"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins} min ago"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 30:
+        return f"{days}d ago"
+    return ts.strftime("%Y-%m-%d")
+
+
+def _workbook_freshness_caption() -> str:
+    """Short caption about when the workbook was last modified."""
+    try:
+        mtime = Path(FILE_PATH).stat().st_mtime
+        return f"workbook updated {_format_relative(datetime.fromtimestamp(mtime))}"
+    except OSError:
+        return "workbook: unknown"
+
+
+def _render_app_sidebar() -> None:
+    """
+    Left-hand sidebar with at-a-glance context: who's signed in, whether
+    they can make library changes, how fresh the data is, and whether
+    the AI backend is reachable. Kept compact — one short line per fact.
+    """
+    with st.sidebar:
+        st.markdown("### 🧪 AbbVie Testing Dashboard")
+
+        # Who
+        user = auth.current_user() or "unknown"
+        role = "admin" if auth.is_admin() else "viewer"
+        badge = "🛠" if role == "admin" else "👤"
+        st.markdown(f"{badge} **{user}** · _{role}_")
+        if role == "viewer":
+            st.caption(f"Ask {auth.admin_contact()} to sync the library or rebuild the index.")
+
+        st.divider()
+
+        # Data freshness
+        st.markdown("**Data**")
+        try:
+            mtime = Path(FILE_PATH).stat().st_mtime
+            st.caption(f"📊 Workbook · {_format_relative(datetime.fromtimestamp(mtime))}")
+        except OSError:
+            st.caption("📊 Workbook · not found")
+
+        index_path = Path(LIBRARY_PATH) / "library_index.json"
+        if index_path.exists():
+            try:
+                with open(index_path, "r", encoding="utf-8") as f:
+                    last_updated = json.load(f).get("last_updated", "")
+                if last_updated:
+                    try:
+                        lu = datetime.fromisoformat(last_updated)
+                        st.caption(f"📚 Library index · {_format_relative(lu)}")
+                    except ValueError:
+                        st.caption(f"📚 Library index · {last_updated}")
+                else:
+                    st.caption("📚 Library index · present")
+            except Exception:
+                st.caption("📚 Library index · unreadable")
+        else:
+            st.caption("📚 Library index · not built")
+
+        vector_file = Path(LIBRARY_PATH) / "library_vectors.npz"
+        if vector_file.exists():
+            try:
+                vt = datetime.fromtimestamp(vector_file.stat().st_mtime)
+                st.caption(f"🧠 Vector index · {_format_relative(vt)}")
+            except OSError:
+                st.caption("🧠 Vector index · present")
+        else:
+            st.caption("🧠 Vector index · not built")
+
+        st.divider()
+
+        # AI status
+        if iliad_client.get_api_key():
+            st.markdown("**AI** · 🟢 connected")
+        else:
+            st.markdown("**AI** · 🔴 no API key")
+            st.caption("Set `ILIAD_API_KEY` and restart.")
+
+        st.divider()
+        st.caption(
+            "[Repo](https://github.com/ajpierce11/Dashboard) · "
+            "[CHANGELOG](https://github.com/ajpierce11/Dashboard/blob/main/CHANGELOG.md)"
+        )
+
+
+# ---------------------------------------------------------------------------
 # App layout
 # ---------------------------------------------------------------------------
 
@@ -4007,25 +4144,29 @@ def main() -> None:
 
     products = sorted(df["Product"].unique().tolist())
 
+    # ── Sidebar: who / what / when ──────────────────────────────────────────
+    # Gives every teammate a glanceable "is this data fresh, am I admin"
+    # panel without cluttering the main area.
+    _render_app_sidebar()
+
     # Header: logo on the left, title + caption on the right. If the logo
     # file is missing, fall back to a title-only header so the app still
     # runs in environments that don't have the assets folder.
+    _workbook_caption = _workbook_freshness_caption()
+    _header_caption = (
+        f"**{len(products)}** products · **{len(timepoints)}** timepoints · "
+        f"data source: `{Path(FILE_PATH).name}` · {_workbook_caption}"
+    )
     if _logo_path.exists():
         logo_col, title_col = st.columns([1, 9], gap="medium", vertical_alignment="center")
         with logo_col:
             st.image(str(_logo_path), width=110)
         with title_col:
             st.title("Testing Dashboard")
-            st.caption(
-                f"**{len(products)}** products · **{len(timepoints)}** timepoints · "
-                f"data source: `{Path(FILE_PATH).name}`"
-            )
+            st.caption(_header_caption)
     else:
         st.title("AbbVie – Testing Dashboard")
-        st.caption(
-            f"**{len(products)}** products · **{len(timepoints)}** timepoints · "
-            f"data source: `{Path(FILE_PATH).name}`"
-        )
+        st.caption(_header_caption)
 
     tab_comparator, tab_library, tab_ai, tab_report = st.tabs([
         "📈 Product Comparator",

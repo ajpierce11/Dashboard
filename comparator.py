@@ -4061,12 +4061,29 @@ def main() -> None:
     # text #EDF0FF (Light Blue), accent #A6B5E0 (Medium Blue).
     st.markdown("""
         <style>
-            /* Layout density + hide default Streamlit chrome */
+            /* Layout density + hide default Streamlit chrome.
+               The top header bar stays visible (transparent background) so
+               the sidebar collapse/expand arrow remains reachable when
+               teammates hide the sidebar. Menu + Deploy button are hidden
+               via #MainMenu and stDeployButton; footer killed outright. */
             .block-container { padding-top: 1.2rem !important; }
-            header[data-testid="stHeader"] { display: none; }
+            header[data-testid="stHeader"] { background: transparent; height: 0; }
+            header[data-testid="stHeader"] > div { display: none; }
+            [data-testid="collapsedControl"] { display: flex !important; }
             #MainMenu { visibility: hidden; }
+            [data-testid="stDeployButton"] { display: none; }
             footer { visibility: hidden; }
             [data-testid="stCaptionContainer"] { margin-top: -0.25rem; color: #A6B5E0; }
+
+            /* Sidebar narrower than the 336px default — the content is
+               short labels, no need to eat that much horizontal space. */
+            section[data-testid="stSidebar"] {
+                width: 240px !important;
+                min-width: 240px !important;
+            }
+            section[data-testid="stSidebar"] > div {
+                width: 240px !important;
+            }
 
             /* Clean system font stack — avoids the default Streamlit
                Source Sans that teammates recognise as "the Streamlit look". */

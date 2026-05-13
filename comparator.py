@@ -4029,9 +4029,9 @@ def _render_user_status_badge() -> None:
     ai_dot = "🟢" if ai_ok else "🔴"
     ai_label = "AI connected" if ai_ok else "AI offline"
     st.markdown(
-        f"<div style='text-align:right;font-size:12px;color:#A6B5E0;"
-        f"margin-top:0.25rem'>"
-        f"{user_icon} {user} · <em>{role}</em>"
+        f"<div style='text-align:right;font-size:14px;color:#EDF0FF;"
+        f"margin-top:0.25rem;line-height:1.4'>"
+        f"{user_icon} <strong>{user}</strong> · <em>{role}</em>"
         f" &nbsp;·&nbsp; {ai_dot} {ai_label}"
         f"</div>",
         unsafe_allow_html=True,

@@ -4325,12 +4325,16 @@ def main() -> None:
         with status_col:
             _render_user_status_badge()
 
-    tab_comparator, tab_library, tab_ai, tab_report = st.tabs([
+    tab_home, tab_comparator, tab_library, tab_ai, tab_report = st.tabs([
+        "🏠 Home",
         "📈 Product Comparator",
         "📚 Document Library",
         "🤖 AI Assistant",
         "📝 Report Generator",
     ])
+
+    with tab_home:
+        render_home(df, timepoints, product_to_ref, product_properties, products)
 
     with tab_comparator:
         render_comparator(df, timepoints, product_to_ref, product_properties, products)
@@ -4343,6 +4347,144 @@ def main() -> None:
 
     with tab_report:
         render_report_generator()
+
+
+def _recent_library_entries(days: int = 14, limit: int = 10) -> list[dict]:
+    """
+    Return library entries whose most recent file mtime is within the last
+    `days`, sorted newest-first. Used by the Home tab's activity feed.
+    """
+    index_path = Path(LIBRARY_PATH) / "library_index.json"
+    if not index_path.exists():
+        return []
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            entries = json.load(f).get("entries", [])
+    except Exception:
+        return []
+
+    cutoff = datetime.now() - pd.Timedelta(days=days)
+    recent = []
+    for e in entries:
+        if e.get("deleted"):
+            continue
+        # Each entry's files list has _mtime_iso; pick the most recent.
+        best_mtime = None
+        for f in e.get("files", []):
+            raw = f.get("_mtime_iso", "")
+            if not raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(raw)
+            except ValueError:
+                continue
+            if best_mtime is None or ts > best_mtime:
+                best_mtime = ts
+        if best_mtime is None or best_mtime < cutoff:
+            continue
+        recent.append({
+            "title": e.get("display_name") or e.get("title", ""),
+            "category": e.get("category", ""),
+            "mtime": best_mtime,
+            "entry_id": e.get("id", ""),
+        })
+    recent.sort(key=lambda r: r["mtime"], reverse=True)
+    return recent[:limit]
+
+
+def render_home(
+    df: pd.DataFrame,
+    timepoints: list[str],
+    product_to_ref: dict[str, str],
+    product_properties: pd.DataFrame,
+    products: list[str],
+) -> None:
+    """
+    First tab — at-a-glance "what's new, what matters" landing page.
+    Replaces the scattered "open each tab to see what's there" start
+    with a single screen that shows library activity and quick links.
+    """
+    st.markdown(
+        f"### Welcome, {auth.current_user() or 'there'} 👋"
+    )
+    st.caption(
+        "Fresh activity across the Library and a quick way to hop into "
+        "any tab. Use this as your starting point each day."
+    )
+
+    col_left, col_right = st.columns([3, 2], gap="large")
+
+    with col_left:
+        st.markdown("#### 🗂 Recently added to Library")
+        recent = _recent_library_entries(days=14, limit=10)
+        if not recent:
+            st.caption(
+                "Nothing has landed in the last 14 days. When new studies "
+                "get added (and the library is Synced), they'll show here."
+            )
+        else:
+            for r in recent:
+                icon = CATEGORY_ICONS.get(r["category"], "📄")
+                st.markdown(
+                    f"- {icon} **{r['title']}** "
+                    f"<span style='color:#A6B5E0;font-size:12px'>"
+                    f"_{r['category']} · {_format_relative(r['mtime'])}_</span>",
+                    unsafe_allow_html=True,
+                )
+
+    with col_right:
+        st.markdown("#### 📊 At a glance")
+        # Workbook freshness
+        try:
+            wb_mtime = Path(FILE_PATH).stat().st_mtime
+            st.caption(
+                f"**Testing data:** {_format_relative(datetime.fromtimestamp(wb_mtime))}"
+            )
+        except OSError:
+            st.caption("**Testing data:** unavailable")
+
+        # Library index freshness
+        index_path = Path(LIBRARY_PATH) / "library_index.json"
+        if index_path.exists():
+            try:
+                with open(index_path, "r", encoding="utf-8") as f:
+                    lu = json.load(f).get("last_updated", "")
+                if lu:
+                    try:
+                        ts = datetime.fromisoformat(lu)
+                        st.caption(f"**Library index:** {_format_relative(ts)}")
+                    except ValueError:
+                        st.caption(f"**Library index:** {lu}")
+                else:
+                    st.caption("**Library index:** present")
+            except Exception:
+                st.caption("**Library index:** unreadable")
+        else:
+            st.caption("**Library index:** not built")
+
+        # Vector index freshness
+        vector_file = Path(LIBRARY_PATH) / "library_vectors.npz"
+        if vector_file.exists():
+            try:
+                vt = datetime.fromtimestamp(vector_file.stat().st_mtime)
+                st.caption(f"**AI vector index:** {_format_relative(vt)}")
+            except OSError:
+                st.caption("**AI vector index:** present")
+        else:
+            st.caption("**AI vector index:** not built")
+
+        st.caption(
+            f"**Products in workbook:** {len(products)}"
+        )
+
+        st.markdown("#### 🔗 Quick actions")
+        st.caption(
+            "Use the tabs above to jump in. The main flows:\n"
+            "- **📈 Product Comparator** — chart + stats for selected products\n"
+            "- **📚 Document Library** — browse, search, preview\n"
+            "- **🤖 AI Assistant** — ask questions grounded in the library\n"
+            "- **📝 Report Generator** — upload a doc, get a polished report"
+        )
 
 
 def render_comparator(

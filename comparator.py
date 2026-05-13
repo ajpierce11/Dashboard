@@ -26,6 +26,7 @@ from datetime import datetime
 from config import FILE_PATH, LIBRARY_PATH
 from title_utils import base_title, clean_stem as _shared_clean_stem, display_title_from_filename
 import auth
+import ai_metadata
 
 STATIC_PROPERTIES = [
     "HA Concentration (mg/mL)",
@@ -4587,6 +4588,120 @@ def _recent_library_entries(days: int = 14, limit: int = 10) -> list[dict]:
     return recent[:limit]
 
 
+def _refresh_ai_metadata() -> None:
+    """
+    Admin action: walk the library index and refresh the AI-extracted
+    metadata cache. Incremental — only studies whose files changed (or
+    that were never processed) get re-extracted. See ai_metadata.py for
+    the extraction schema.
+    """
+    index_path = Path(LIBRARY_PATH) / "library_index.json"
+    if not index_path.exists():
+        st.error("Library index not found. Run Library Sync first.")
+        return
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            entries = json.load(f).get("entries", [])
+    except Exception as e:
+        st.error(f"Could not read library index: {e}")
+        return
+
+    cache = ai_metadata.load_metadata(LIBRARY_PATH)
+    to_extract, orphan_ids = ai_metadata.plan_extraction(entries, cache)
+
+    if not to_extract and not orphan_ids:
+        st.info("AI metadata is already in sync with the library.")
+        return
+
+    if to_extract:
+        st.caption(
+            f"Extracting structured metadata for **{len(to_extract)}** "
+            f"studies. Roughly ~{max(1, len(to_extract) // 50)} min at "
+            f"10 parallel workers."
+        )
+
+    bar = st.progress(0, text="Starting…")
+    def _cb(done: int, total: int, msg: str) -> None:
+        pct = int(done / max(total, 1) * 100)
+        bar.progress(min(pct, 100), text=msg)
+
+    with st.spinner("Refreshing AI metadata…"):
+        result = ai_metadata.run_extraction(
+            LIBRARY_PATH,
+            entries,
+            extract_text_fn=_cached_extract_text,
+            progress_callback=_cb,
+        )
+    bar.empty()
+
+    st.success(
+        f"Extracted **{result['extracted']}** new/changed studies, "
+        f"pruned **{result['orphaned']}** orphaned entries. "
+        f"Errors: {result['errors']}."
+    )
+
+
+def _render_coverage_matrix() -> None:
+    """
+    Products × models heatmap derived from the AI metadata cache.
+
+    Each cell = number of studies that matched that (product, model)
+    combination. Gives admins and bench scientists a fast view of
+    "where have we looked, and where haven't we?"
+    """
+    meta = ai_metadata.load_entries_keyed(LIBRARY_PATH)
+    if not meta:
+        st.caption(
+            "AI metadata hasn't been extracted yet. Click "
+            "**🧠 Refresh AI metadata** above to build the cache, then "
+            "this coverage matrix will populate."
+        )
+        return
+
+    rows = []
+    for eid, rec in meta.items():
+        if not rec.get("ok", False):
+            continue
+        products_raw = rec.get("product", "") or ""
+        products_list = [p.strip() for p in products_raw.split(",") if p.strip()]
+        if not products_list:
+            products_list = ["(unspecified)"]
+        model = (rec.get("model", "") or "").strip() or "(unspecified)"
+        for p in products_list:
+            rows.append({"Product": p, "Model": model, "entry_id": eid})
+
+    if not rows:
+        st.caption("No usable metadata yet. Try refreshing.")
+        return
+
+    cov_df = pd.DataFrame(rows)
+    counts = (
+        cov_df.groupby(["Product", "Model"])["entry_id"]
+        .count()
+        .unstack(fill_value=0)
+        .sort_index()
+    )
+    st.markdown("#### 🗺️ Coverage matrix")
+    st.caption(
+        "Each cell is the number of studies tagged with that product × "
+        "model pair. Zeros (blanks) flag gaps you may not have tested yet."
+    )
+    st.dataframe(counts, use_container_width=True)
+    with st.expander("What was extracted (raw)"):
+        # Show a small table of the per-entry extractions for spot-check.
+        sample = pd.DataFrame([
+            {
+                "Title": m.get("entry_id", "")[:60],
+                "Product": m.get("product", ""),
+                "Model": m.get("model", ""),
+                "Endpoints": ", ".join(m.get("endpoints", []) or []),
+                "Timepoints": ", ".join(m.get("timepoints", []) or []),
+            }
+            for m in meta.values() if m.get("ok", False)
+        ])
+        st.dataframe(sample, use_container_width=True, height=300)
+
+
 def render_home(
     df: pd.DataFrame,
     timepoints: list[str],
@@ -4606,6 +4721,17 @@ def render_home(
         "Fresh activity across the Library and a quick way to hop into "
         "any tab. Use this as your starting point each day."
     )
+
+    # Admin-only: trigger an incremental AI-metadata refresh.
+    if auth.is_admin():
+        adm_col, _ = st.columns([1, 4])
+        with adm_col:
+            if st.button("🧠 Refresh AI metadata", use_container_width=True,
+                         help="Walk the library and extract structured "
+                              "metadata (product, model, endpoints, "
+                              "timepoints) per study. Incremental — only "
+                              "new/changed studies are re-processed."):
+                _refresh_ai_metadata()
 
     col_left, col_right = st.columns([3, 2], gap="large")
 
@@ -4700,6 +4826,9 @@ def render_home(
             "- **🤖 AI Assistant** — ask questions grounded in the library\n"
             "- **📝 Report Generator** — upload a doc, get a polished report"
         )
+
+    st.divider()
+    _render_coverage_matrix()
 
 
 def render_comparator(

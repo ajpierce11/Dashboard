@@ -5,6 +5,8 @@ Notable changes to the Testing Dashboard. Newest at top. Versioning is date-base
 ## 2026-05-13
 
 ### Added
+- **🧠 AI metadata enrichment layer** — new `ai_metadata.py` module walks the library and has the LLM extract structured scientific fields (product, model, endpoints, timepoints) per study, cached in `Library/library_ai_metadata.json`. Runs incrementally — only new/changed studies are re-processed — so subsequent refreshes are seconds. Sits alongside `library_index.json` and `library_vectors.npz` without replacing either.
+- **🗺 Coverage matrix** on the Home tab — heatmap of studies by product × model, built from the AI metadata. Makes "where have we looked, and where haven't we?" a glanceable question. Includes a raw-extraction view so admins can spot-check the AI's tagging.
 - **🏠 Home tab** — new first tab with recent library additions (last 14 days), data freshness across workbook / index / vectors, and a welcome line. Replaces "open each tab to see what's there" with a glanceable landing page.
 - **⭐ Library bookmarks** — star any document to pin it to your Home tab. Stored per-user under `Library/.user_prefs/<username>.json` so bookmarks follow you across machines.
 - **AI follow-up suggestions** — after every AI answer, the model proposes 3 concise follow-up questions as buttons. Click one to queue it as the next turn.

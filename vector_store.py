@@ -34,7 +34,7 @@ VECTOR_FILE = "library_vectors.npz"   # saved in the Library folder
 # Text chunking
 # ---------------------------------------------------------------------------
 
-MAX_CHUNKS_PER_DOC = 80  # up to ~30 pages at the default CHUNK_SIZE
+MAX_CHUNKS_PER_DOC = 200  # up to ~80 pages at the default CHUNK_SIZE
 
 
 def _chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:

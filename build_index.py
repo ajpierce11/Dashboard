@@ -96,10 +96,16 @@ existing_ids: set = set()
 if vector_file.exists():
     print("  Existing index found — only embedding new documents...")
     try:
-        data = np.load(str(vector_file), allow_pickle=True)
-        existing_vectors  = data["vectors"]
-        existing_metadata = [json.loads(m) for m in data["metadata"]]
-        existing_ids      = {m["entry_id"] for m in existing_metadata}
+        # CRITICAL: read data into memory and close the NpzFile handle
+        # immediately. np.load returns a lazy file handle that, on Windows,
+        # blocks the os.replace at the end of the run with a PermissionError.
+        # Loading then closing — combined with .copy() to detach the arrays
+        # from the file's mmap — releases the handle before we ever try to
+        # rewrite the file.
+        with np.load(str(vector_file), allow_pickle=True) as data:
+            existing_vectors  = data["vectors"].copy()
+            existing_metadata = [json.loads(m) for m in data["metadata"]]
+            existing_ids      = {m["entry_id"] for m in existing_metadata}
         print(f"  Already indexed: {len(existing_ids)} documents ({len(existing_metadata)} chunks)")
     except Exception as e:
         print(f"  Could not load existing index ({e}) — full rebuild")
@@ -155,14 +161,32 @@ def flush():
 
     # Atomic write: .tmp + os.replace. A second writer or a crash mid-save
     # can no longer leave a partial .npz that every reader fails to load.
+    # Pass a FILE HANDLE to savez_compressed — when given a string path
+    # that doesn't end in .npz, numpy silently appends .npz, so the tmp
+    # path "library_vectors.npz.tmp" becomes "library_vectors.npz.tmp.npz"
+    # and the os.replace then fails with FileNotFoundError.
     tmp_file = vector_file.with_suffix(vector_file.suffix + ".tmp")
-    np.savez_compressed(
-        str(tmp_file),
-        vectors=save_v,
-        metadata=np.array([json.dumps(m) for m in save_m], dtype=object),
-        index_stamp=np.array([index_stamp], dtype=object),
-    )
-    os.replace(str(tmp_file), str(vector_file))
+    with open(tmp_file, "wb") as f:
+        np.savez_compressed(
+            f,
+            vectors=save_v,
+            metadata=np.array([json.dumps(m) for m in save_m], dtype=object),
+            index_stamp=np.array([index_stamp], dtype=object),
+        )
+    # Retry os.replace on Windows: OneDrive sync, antivirus, or another
+    # process can hold a transient handle that fails the first replace
+    # with PermissionError. Give it a few short retries before giving up.
+    last_err: Exception | None = None
+    for attempt in range(6):
+        try:
+            os.replace(str(tmp_file), str(vector_file))
+            last_err = None
+            break
+        except PermissionError as e:
+            last_err = e
+            time.sleep(0.5 * (attempt + 1))
+    if last_err is not None:
+        raise last_err
     batch_v = []
     batch_m = []
 

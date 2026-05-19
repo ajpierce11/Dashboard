@@ -62,9 +62,13 @@ def _chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP)
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
-        start = end - overlap
-        if start >= len(text):
+        # If we've consumed all the text, stop. Critical for short docs:
+        # without this, end-overlap can go negative for docs < (size - overlap)
+        # chars, sending the loop into a same-chunk infinite cycle that only
+        # the MAX_CHUNKS_PER_DOC cap halts.
+        if end >= len(text):
             break
+        start = end - overlap
 
     if truncated:
         print(
@@ -140,17 +144,24 @@ class VectorStore:
         except Exception:
             pass
 
+        # Important: pass an OPEN FILE HANDLE to savez_compressed instead
+        # of a string path. When given a string that doesn't end in .npz,
+        # numpy silently appends .npz to it — so a tmp path like
+        # "library_vectors.npz.tmp" becomes "library_vectors.npz.tmp.npz"
+        # on disk, and the os.replace below fails with FileNotFoundError.
+        # File handles are written to verbatim.
         tmp_file = self.vector_file.with_suffix(
             self.vector_file.suffix + ".tmp"
         )
-        np.savez_compressed(
-            str(tmp_file),
-            vectors=self._vectors,
-            metadata=np.array(
-                [json.dumps(m) for m in self._metadata], dtype=object
-            ),
-            index_stamp=np.array([index_stamp], dtype=object),
-        )
+        with open(tmp_file, "wb") as f:
+            np.savez_compressed(
+                f,
+                vectors=self._vectors,
+                metadata=np.array(
+                    [json.dumps(m) for m in self._metadata], dtype=object
+                ),
+                index_stamp=np.array([index_stamp], dtype=object),
+            )
         os.replace(str(tmp_file), str(self.vector_file))
 
     def _load(self) -> bool:
@@ -158,9 +169,13 @@ class VectorStore:
         if not self.vector_file.exists():
             return False
         try:
-            data = np.load(str(self.vector_file), allow_pickle=True)
-            self._vectors  = data["vectors"]
-            self._metadata = [json.loads(m) for m in data["metadata"]]
+            # Use a context manager + .copy() so the NpzFile handle is
+            # closed immediately. Without this, on Windows the file stays
+            # open (especially when sitting on OneDrive) and any subsequent
+            # rebuild's os.replace fails with PermissionError.
+            with np.load(str(self.vector_file), allow_pickle=True) as data:
+                self._vectors  = data["vectors"].copy()
+                self._metadata = [json.loads(m) for m in data["metadata"]]
             try:
                 self._loaded_mtime = self.vector_file.stat().st_mtime
             except OSError:

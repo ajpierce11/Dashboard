@@ -454,6 +454,36 @@ def build_properties_bars(
 # Export
 # ---------------------------------------------------------------------------
 
+def _fig_to_png_bytes(fig: "go.Figure", width: int, height: int) -> bytes | None:
+    """
+    Render a Plotly figure to PNG bytes for embedding in an Excel sheet.
+    Forces a light theme so the chart is legible on a white spreadsheet —
+    the dashboard's dark template with transparent backgrounds renders
+    poorly when dropped onto Excel's default white grid.
+
+    Returns None if Kaleido is missing or rendering fails — the export
+    still succeeds, just without the visual.
+    """
+    if fig is None:
+        return None
+    try:
+        # Deep-copy via to_dict/from_dict so the on-screen figure isn't mutated
+        export_fig = go.Figure(fig.to_dict())
+        export_fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            font=dict(color="#222"),
+        )
+        # Polar charts have their own bg; recolor for light theme
+        export_fig.update_polars(bgcolor="white")
+        return export_fig.to_image(
+            format="png", width=width, height=height, scale=2,
+        )
+    except Exception:
+        return None
+
+
 def build_excel_export(
     filtered: pd.DataFrame,
     pivot_avg: pd.DataFrame,
@@ -513,6 +543,89 @@ def build_excel_export(
         for col in props.columns:
             props[col] = pd.to_numeric(props[col], errors="coerce").round(3)
         props.to_excel(writer, sheet_name="Product properties")
+
+        # --- Sheet 5: rendered Plotly visuals as PNGs ---
+        # Pixel-matched copies of the dashboard's three charts. These are
+        # static images (not editable in Excel) but capture the radar and
+        # bar charts that xlsxwriter's native chart types can't reproduce
+        # cleanly. The native line chart on "Chart data" stays for users
+        # who want to tweak it inside Excel.
+        viz_ws = wb.add_worksheet("Visuals")
+        viz_ws.set_column("A:A", 2)  # narrow gutter
+        title_fmt = wb.add_format({"bold": True, "font_size": 14})
+        sub_fmt   = wb.add_format({"italic": True, "font_color": "#666666"})
+
+        # Build the figures fresh from the data (don't depend on any
+        # cached on-screen state) and render each to PNG.
+        try:
+            lift_fig = build_figure(
+                filtered, pivot_avg, pivot_std,
+                selected_products, product_to_ref,
+            )
+        except Exception:
+            lift_fig = None
+        try:
+            radar_fig = build_properties_radar(
+                product_properties, selected_products, product_to_ref,
+            )
+        except Exception:
+            radar_fig = None
+        try:
+            bars_fig = build_properties_bars(
+                product_properties, selected_products, product_to_ref,
+            )
+        except Exception:
+            bars_fig = None
+
+        row = 1
+        sections = [
+            ("Lift capacity over time",
+             "Mean ± SD per timepoint for each selected product.",
+             lift_fig, 1200, 500),
+            ("Properties — radar",
+             "Per-attribute normalisation against the full dataset range.",
+             radar_fig, 900, 700),
+            ("Properties — small multiples",
+             "Raw values per attribute, one panel each.",
+             bars_fig, 1400, 400),
+        ]
+
+        any_rendered = False
+        for title, subtitle, fig, w, h in sections:
+            viz_ws.write(row, 1, title, title_fmt)
+            viz_ws.write(row + 1, 1, subtitle, sub_fmt)
+            png = _fig_to_png_bytes(fig, width=w, height=h)
+            if png is not None:
+                # x_scale/y_scale = 0.5 because we render at scale=2 for
+                # crispness — the inserted image lands at the requested
+                # logical width/height instead of double-size.
+                viz_ws.insert_image(
+                    row + 3, 1, f"{title}.png",
+                    {
+                        "image_data": BytesIO(png),
+                        "x_scale": 0.5,
+                        "y_scale": 0.5,
+                    },
+                )
+                any_rendered = True
+                # Each chart gets ~30 rows of vertical space at default
+                # row height (15 px) — enough to clear the inserted image.
+                row += 32
+            else:
+                viz_ws.write(
+                    row + 3, 1,
+                    "(chart could not be rendered — Kaleido may be missing)",
+                    sub_fmt,
+                )
+                row += 5
+
+        if not any_rendered:
+            viz_ws.write(
+                0, 1,
+                "Visuals could not be rendered. Install kaleido (`pip install "
+                "kaleido`) to enable PNG export.",
+                sub_fmt,
+            )
 
     output.seek(0)
     return output
@@ -3220,6 +3333,7 @@ def render_report_generator() -> None:
     summary or full study report contextualised by the library.
     """
     from doc_text import extract_text
+    from doc_images import extract_images, MAX_IMAGES_PER_DOC
 
     st.subheader("📝 Report Generator")
     st.caption(
@@ -3259,8 +3373,8 @@ def render_report_generator() -> None:
              "they'll be synthesised into one report.",
     )
 
-    # Per-file extraction cache: {(name, size): extracted_text}. Adding a
-    # new file never re-parses the files that are already cached.
+    # Per-file extraction cache: {(name, size): {"text": ..., "images": [...]}}.
+    # Adding a new file never re-parses the files that are already cached.
     extracted_files: list[dict] = []
     if uploaded_files:
         file_cache = st.session_state.setdefault("_rg_file_cache", {})
@@ -3268,11 +3382,17 @@ def render_report_generator() -> None:
         for f in uploaded_files:
             key = (f.name, f.size)
             if key in file_cache:
-                extracted_files.append({
-                    "name": f.name, "size": f.size,
-                    "text": file_cache[key],
-                })
-                continue
+                cached = file_cache[key]
+                # Old cache format was just the text string. Re-extract if so.
+                if isinstance(cached, dict):
+                    extracted_files.append({
+                        "name": f.name, "size": f.size,
+                        "text":   cached["text"],
+                        "images": cached.get("images", []),
+                    })
+                    continue
+                # Fall through to re-extraction for legacy cache entries.
+                file_cache.pop(key, None)
             any_new = True
             import tempfile, os
             suffix = Path(f.name).suffix.lower() or ".bin"
@@ -3283,15 +3403,18 @@ def render_report_generator() -> None:
                     tmp_path = tmp.name
                 with st.spinner(f"Extracting text from {f.name}…"):
                     text_i = extract_text(tmp_path)
+                with st.spinner(f"Extracting images from {f.name}…"):
+                    images_i = extract_images(tmp_path)
             finally:
                 if tmp_path:
                     try:
                         os.remove(tmp_path)
                     except OSError:
                         pass
-            file_cache[key] = text_i
+            file_cache[key] = {"text": text_i, "images": images_i}
             extracted_files.append({
-                "name": f.name, "size": f.size, "text": text_i,
+                "name": f.name, "size": f.size,
+                "text": text_i, "images": images_i,
             })
 
         # Any time the upload set changes, drop the previously generated report
@@ -3360,7 +3483,8 @@ def render_report_generator() -> None:
 
         total_size = sum(f["size"] for f in non_empty)
         total_extracted = sum(len(f["text"]) for f in non_empty)
-        col_a, col_b, col_c = st.columns(3)
+        total_images = sum(len(f.get("images", [])) for f in non_empty)
+        col_a, col_b, col_c, col_d = st.columns(4)
         col_a.metric("Files", f"{len(non_empty)}")
         col_b.metric("Total size", f"{total_size / 1024:,.0f} KB")
         col_c.metric(
@@ -3369,18 +3493,28 @@ def render_report_generator() -> None:
             help="Combined length sent to the LLM vs total extracted. "
                  "Budget is split fairly across files."
         )
+        col_d.metric(
+            "Images extracted",
+            f"{total_images}",
+            help=f"Embedded images found across all uploads. Capped at "
+                 f"{MAX_IMAGES_PER_DOC} per file.",
+        )
 
         with st.expander("Uploaded files", expanded=any_truncated):
             for f in non_empty:
                 flag = "  ⚠ truncated" if f.get("_truncated") else ""
+                img_n = len(f.get("images", []))
+                img_str = f", {img_n} image(s)" if img_n else ""
                 st.caption(
                     f"📄 **{f['name']}** — {f['size'] / 1024:,.0f} KB, "
                     f"{len(f['text']):,} chars extracted, "
-                    f"{f.get('_chars_used', 0):,} chars sent{flag}"
+                    f"{f.get('_chars_used', 0):,} chars sent{img_str}{flag}"
                 )
     else:
         text = ""
         upload_label = ""
+        non_empty = []
+        total_images = 0
 
     # ── Configuration ───────────────────────────────────────────────────────
     st.markdown("")
@@ -3391,6 +3525,55 @@ def render_report_generator() -> None:
         key="rg_output_type",
     )
 
+    user_notes = st.text_area(
+        "Additional notes for the AI (optional)",
+        key="rg_user_notes",
+        placeholder=(
+            "Optional focus areas — these supplement the standard report, they "
+            "don't replace it. Useful for describing things the model can't see "
+            "directly (e.g. images in a PPTX) or pointing it at specific "
+            "details.\n\n"
+            "Example: \"Slide 4 has a strain-sweep curve — comment on the "
+            "modulus crossover point. Slide 7's bar chart shows extrusion "
+            "force across three lots; flag any lot-to-lot variation.\""
+        ),
+        height=120,
+        help="Leave blank for a standard report. Anything you type here is "
+             "added as supplemental guidance — the model will still produce "
+             "the full template structure.",
+    )
+
+    include_images = st.checkbox(
+        f"Include images from uploaded documents ({total_images} found)"
+        if total_images
+        else "Include images from uploaded documents (none found)",
+        value=bool(total_images),
+        disabled=not total_images,
+        key="rg_include_images",
+        help="When on, embedded images (charts, photos, slide media) are "
+             "sent to Claude alongside the extracted text. Adds ~1.5k "
+             "tokens per image to the request, so cost rises with image "
+             "count. Turn off for a text-only run.",
+    )
+
+    images_to_send: list[dict] = []
+    if include_images and total_images:
+        # Collect images across files, cap globally to MAX_IMAGES_TOTAL so
+        # a multi-file upload can't blow the request size up unboundedly.
+        MAX_IMAGES_TOTAL = 30
+        for f in non_empty:
+            for img in f.get("images", []):
+                if len(images_to_send) >= MAX_IMAGES_TOTAL:
+                    break
+                images_to_send.append({**img, "_source_file": f["name"]})
+            if len(images_to_send) >= MAX_IMAGES_TOTAL:
+                break
+        if total_images > len(images_to_send):
+            st.caption(
+                f"_Sending {len(images_to_send)} of {total_images} images "
+                f"(global cap: {MAX_IMAGES_TOTAL})._"
+            )
+
     generate_disabled = not text.strip()
     if st.button(
         "✨ Generate report",
@@ -3398,7 +3581,9 @@ def render_report_generator() -> None:
         disabled=generate_disabled,
         key="rg_generate_btn",
     ):
-        _run_report_generation(text, upload_label, output_type, vs)
+        _run_report_generation(
+            text, upload_label, output_type, vs, user_notes, images_to_send,
+        )
     if output_type == "Full study report":
         st.caption(
             "_Full reports with tables typically take 3–5 minutes to stream. "
@@ -3473,8 +3658,11 @@ def _run_report_generation(
     upload_filename: str,
     output_type: str,
     vs: "VectorStore | None",
+    user_notes: str = "",
+    images: list[dict] | None = None,
 ) -> None:
     """Run retrieval + LLM synthesis and persist the result for rendering."""
+    images = images or []
 
     status = st.status("Preparing context…", expanded=False)
     with status:
@@ -3483,10 +3671,12 @@ def _run_report_generation(
 
         # Seed library retrieval with the uploaded document itself. Using the
         # first 8k chars gives enough signal for the embedding model without
-        # burning API budget on the whole file.
+        # burning API budget on the whole file. User notes are prepended so
+        # any specific topic the user flagged biases retrieval toward it.
         library_chunks: list[dict] = []
         if vs is not None and vs.is_built():
-            seed = upload_text[:8000]
+            notes_seed = (user_notes.strip() + "\n\n") if user_notes.strip() else ""
+            seed = (notes_seed + upload_text)[:8000]
             st.write(f"Searching library for related prior studies (top {REPORT_LIBRARY_TOPK})…")
             try:
                 library_chunks = vs.search(seed, top_k=REPORT_LIBRARY_TOPK) or []
@@ -3532,6 +3722,20 @@ def _run_report_generation(
                 "Use the following library documents for context. These are "
                 "the ONLY library documents you may cite by name.\n\n" + lib_ctx
             )
+        notes_clean = user_notes.strip()
+        if notes_clean:
+            user_parts.append(
+                "The user has provided additional notes to guide your "
+                "analysis. These are ADDITIONAL focus areas — do NOT let them "
+                f"override or shrink the standard {output_type} structure. "
+                "Address them within the appropriate sections of the report. "
+                "If the notes describe figures, charts, or images that you "
+                "cannot directly see in the extracted text, treat the user's "
+                "description as authoritative and analyse accordingly.\n\n"
+                "=== USER NOTES ===\n"
+                f"{notes_clean}\n"
+                "=== END USER NOTES ==="
+            )
         user_parts.append(
             f"Produce the {output_type}."
         )
@@ -3547,12 +3751,52 @@ def _run_report_generation(
                 "the ONLY library documents you may cite by name.\n\n" + trimmed
             )
 
-        user_content = "\n\n".join(user_parts)
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user_content},
-        ]
-        st.write(f"Sending **{len(user_content):,}** characters to the model…")
+        # If we have images, switch the user message to multimodal: the
+        # bulk of the prompt becomes a single text block, the image bytes
+        # follow as ImageContent blocks, and the closing "Produce the X"
+        # instruction lands as a final text block AFTER the images so the
+        # model sees them before being asked to produce output. The ILIAD
+        # gateway's flat ImageContent shape is {type, media_type, data}.
+        if images:
+            lead_text  = "\n\n".join(user_parts[:-1])
+            tail_text  = user_parts[-1]
+            image_intro = (
+                f"\n\n{len(images)} embedded image(s) from the uploaded "
+                f"document(s) follow this text. Examine each image and "
+                f"integrate what you see into the relevant sections of "
+                f"the report. If the user's notes (above) describe what "
+                f"to look for in specific images, prioritise those points."
+            )
+            user_blocks: list[dict] = [
+                {"type": "text", "text": lead_text + image_intro},
+            ]
+            for img in images:
+                user_blocks.append({
+                    "type":       "image",
+                    "media_type": img["media_type"],
+                    "data":       img["data_b64"],
+                })
+            user_blocks.append({"type": "text", "text": tail_text})
+
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_blocks},
+            ]
+            text_chars = sum(
+                len(b["text"]) for b in user_blocks if b["type"] == "text"
+            )
+            img_kb = sum(img["size_bytes"] for img in images) / 1024
+            st.write(
+                f"Sending **{text_chars:,}** chars of text plus "
+                f"**{len(images)} image(s)** ({img_kb:,.0f} KB) to the model…"
+            )
+        else:
+            user_content = "\n\n".join(user_parts)
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_content},
+            ]
+            st.write(f"Sending **{len(user_content):,}** characters to the model…")
     status.update(label=f"Composing {output_type.lower()}…", state="running")
 
     # Stream the response so user sees output as it generates. Reports get
@@ -4415,6 +4659,201 @@ def _render_user_status_badge() -> None:
 
 
 # ---------------------------------------------------------------------------
+# In-app feedback / bug reports
+# ---------------------------------------------------------------------------
+
+FEEDBACK_TYPES = ["Suggestion", "Bug", "Question"]
+FEEDBACK_CATEGORIES = [
+    "Home", "Product Comparator", "Document Library",
+    "AI Assistant", "Report Generator", "General / other",
+]
+
+
+@st.dialog("Send feedback")
+def _feedback_dialog() -> None:
+    """
+    Modal form for users to file feedback, bugs, or questions. Identity
+    is auto-captured from auth.current_user() — no anonymous option per
+    the project's chosen workflow.
+    """
+    import feedback_store
+
+    user = auth.current_user() or "(unknown)"
+    st.caption(f"Submitting as **{user}**")
+
+    f_type = st.radio(
+        "Type", FEEDBACK_TYPES, horizontal=True, key="fb_type",
+    )
+    f_cat = st.selectbox(
+        "Which part of the dashboard?", FEEDBACK_CATEGORIES, key="fb_cat",
+    )
+    f_title = st.text_input(
+        "Title (one-line summary)",
+        key="fb_title",
+        placeholder="e.g. Library search returns nothing for 'AB-001'",
+    )
+    f_body = st.text_area(
+        "Details",
+        key="fb_body",
+        placeholder=(
+            "What happened, what you expected, and any steps to reproduce. "
+            "If reporting a bug, paste the error message you saw."
+        ),
+        height=160,
+    )
+
+    cols = st.columns([1, 1])
+    with cols[0]:
+        if st.button("Submit", type="primary", use_container_width=True,
+                     disabled=not f_title.strip(), key="fb_submit"):
+            new_id = feedback_store.submit(
+                user=user,
+                type=f_type.lower(),
+                category=f_cat,
+                title=f_title,
+                body=f_body,
+                context={"submitted_via": "dialog"},
+            )
+            if new_id > 0:
+                st.success(f"Logged as #{new_id}. Thanks!")
+                # Clear the form keys so the next open is fresh
+                for k in ("fb_type", "fb_cat", "fb_title", "fb_body"):
+                    st.session_state.pop(k, None)
+                st.rerun()
+            else:
+                st.error("Could not save feedback. Try again or contact the admin.")
+    with cols[1]:
+        if st.button("Cancel", use_container_width=True, key="fb_cancel"):
+            st.rerun()
+
+
+def _render_feedback_button() -> None:
+    """Small top-right button that opens the feedback dialog."""
+    if st.button(
+        "💬 Feedback",
+        key="fb_open_btn",
+        help="Send a suggestion, bug report, or question to the admin",
+        use_container_width=True,
+    ):
+        _feedback_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Feedback Inbox (admin-only)
+# ---------------------------------------------------------------------------
+
+def render_feedback_inbox() -> None:
+    """
+    Admin-only view of all submitted feedback, bug reports, and
+    auto-captured errors. Filters by status and type, expandable rows
+    for full body/context/traceback, mark resolved / reopen actions.
+    """
+    import feedback_store
+
+    st.subheader("📨 Feedback Inbox")
+
+    counts = feedback_store.counts_by_status()
+    open_n     = counts.get("open", 0)
+    resolved_n = counts.get("resolved", 0)
+    st.caption(
+        f"**{open_n}** open · **{resolved_n}** resolved · "
+        f"**{open_n + resolved_n}** total submissions"
+    )
+
+    # Filters
+    f_col1, f_col2, f_col3 = st.columns([1, 1, 2])
+    with f_col1:
+        status_filter = st.selectbox(
+            "Status",
+            options=["open", "resolved", "all"],
+            index=0,
+            key="fb_inbox_status",
+        )
+    with f_col2:
+        type_filter = st.selectbox(
+            "Type",
+            options=["all", "suggestion", "bug", "question", "error"],
+            index=0,
+            key="fb_inbox_type",
+        )
+    with f_col3:
+        st.caption(
+            "_Submissions are auto-logged from the Send Feedback button "
+            "and from any unhandled errors users hit. Resolve when fixed._"
+        )
+
+    entries = feedback_store.list_entries(
+        status=status_filter, type=type_filter,
+    )
+
+    if not entries:
+        st.info("No entries match the current filters.")
+        return
+
+    # Type → emoji for at-a-glance scanning
+    type_icons = {
+        "suggestion": "💡",
+        "bug":        "🐛",
+        "question":   "❓",
+        "error":      "🚨",
+    }
+
+    for e in entries:
+        icon = type_icons.get(e["type"], "📩")
+        status_chip = "🟢 open" if e["status"] == "open" else "✅ resolved"
+        ts_short = (e["timestamp"] or "")[:16].replace("T", " ")
+        title_line = (
+            f"{icon} **{e['title']}** "
+            f"<span style='color:#A6B5E0;font-size:12px'>"
+            f"_{e['type']} · {e['category'] or 'n/a'} · "
+            f"{e['user']} · {ts_short} · {status_chip}_</span>"
+        )
+        with st.expander(label=f"#{e['id']} · {e['title']}", expanded=False):
+            st.markdown(title_line, unsafe_allow_html=True)
+            if e.get("body"):
+                st.markdown(
+                    f"<div style='font-size:14px;line-height:1.55;"
+                    f"white-space:pre-wrap;margin-top:0.5rem'>{e['body']}</div>",
+                    unsafe_allow_html=True,
+                )
+            if e.get("traceback"):
+                with st.expander("Traceback", expanded=False):
+                    st.code(e["traceback"], language="python")
+            if e.get("context"):
+                with st.expander("Context", expanded=False):
+                    st.code(e["context"], language="json")
+
+            # Resolve / Reopen
+            action_col, info_col = st.columns([1, 3])
+            with action_col:
+                if e["status"] == "open":
+                    if st.button(
+                        "Mark resolved",
+                        key=f"fb_resolve_{e['id']}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        feedback_store.mark_resolved(
+                            e["id"], by=auth.current_user() or "(unknown)",
+                        )
+                        st.rerun()
+                else:
+                    if st.button(
+                        "Reopen",
+                        key=f"fb_reopen_{e['id']}",
+                        use_container_width=True,
+                    ):
+                        feedback_store.reopen(e["id"])
+                        st.rerun()
+            with info_col:
+                if e["status"] == "resolved":
+                    rt = (e.get("resolved_at") or "")[:16].replace("T", " ")
+                    st.caption(
+                        f"Resolved by **{e.get('resolved_by','?')}** at {rt}"
+                    )
+
+
+# ---------------------------------------------------------------------------
 # App layout
 # ---------------------------------------------------------------------------
 
@@ -4469,6 +4908,28 @@ def main() -> None:
             html, body, [class*="css"], .stMarkdown, .stChatMessage {
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
                              "Helvetica Neue", Arial, sans-serif;
+            }
+
+            /* Tighten bordered containers (st.container(border=True)) used
+               for doc cards and bookmark rows. Streamlit's default padding
+               leaves the contents swimming inside an oversized box; this
+               wraps them more snugly without changing any font sizes. */
+            [data-testid="stVerticalBlockBorderWrapper"] > div > div {
+                padding-top:    0.5rem;
+                padding-bottom: 0.5rem;
+            }
+
+            /* Streamlit buttons default to ~40px tall with generous
+               padding, which makes icon-only buttons (like the bookmark
+               star) tower over inline text. Trim both axes so they sit
+               proportionally next to titles in the same row. Doesn't
+               change colors or fonts — only density. */
+            .stButton > button,
+            .stDownloadButton > button {
+                padding:        0.2rem 0.55rem;
+                min-height:     unset;
+                line-height:    1.3;
+                font-size:      0.9rem;
             }
 
             /* Titled headers in Medium Blue with a brighter accent bar */
@@ -4573,6 +5034,14 @@ def main() -> None:
         f"**{len(products)}** products · **{len(timepoints)}** timepoints · "
         f"data source: `{Path(FILE_PATH).name}` · {_workbook_caption}"
     )
+    # Initialise the feedback store once per session — idempotent so
+    # safe on every rerun.
+    try:
+        import feedback_store
+        feedback_store.init_db()
+    except Exception:
+        pass  # feedback is non-critical; never block app startup
+
     if _logo_path.exists():
         logo_col, title_col, status_col = st.columns(
             [1, 7, 2.5], gap="medium", vertical_alignment="center"
@@ -4584,6 +5053,7 @@ def main() -> None:
             st.caption(_header_caption)
         with status_col:
             _render_user_status_badge()
+            _render_feedback_button()
     else:
         title_col, status_col = st.columns([8, 2.5], vertical_alignment="center")
         with title_col:
@@ -4591,14 +5061,22 @@ def main() -> None:
             st.caption(_header_caption)
         with status_col:
             _render_user_status_badge()
+            _render_feedback_button()
 
-    tab_home, tab_comparator, tab_library, tab_ai, tab_report = st.tabs([
+    # Inbox tab is admin-only; show it last so it doesn't disrupt the
+    # main four-tab layout for non-admins.
+    tab_labels = [
         "🏠 Home",
         "📈 Product Comparator",
         "📚 Document Library",
         "🤖 AI Assistant",
         "📝 Report Generator",
-    ])
+    ]
+    if auth.is_admin():
+        tab_labels.append("📨 Feedback Inbox")
+
+    tabs = st.tabs(tab_labels)
+    tab_home, tab_comparator, tab_library, tab_ai, tab_report = tabs[:5]
 
     with tab_home:
         render_home(df, timepoints, product_to_ref, product_properties, products)
@@ -4614,6 +5092,10 @@ def main() -> None:
 
     with tab_report:
         render_report_generator()
+
+    if auth.is_admin():
+        with tabs[5]:
+            render_feedback_inbox()
 
 
 # ---------------------------------------------------------------------------
@@ -4702,9 +5184,13 @@ def _bookmarked_entries() -> list[dict]:
         if e is None:
             continue
         out.append({
-            "title": e.get("display_name") or e.get("title", ""),
-            "category": e.get("category", ""),
-            "entry_id": eid,
+            "title":        e.get("display_name") or e.get("title", ""),
+            "category":     e.get("category", ""),
+            "entry_id":     eid,
+            "files":        e.get("files", []),
+            "preview":      e.get("preview", ""),
+            "modified":     e.get("modified", ""),
+            "has_versions": e.get("has_versions", False),
         })
     out.sort(key=lambda r: r["title"].lower())
     return out
@@ -4912,14 +5398,55 @@ def render_home(
                 "bookmarks follow you across machines."
             )
         else:
-            for b in bookmarks:
+            # Compact one-row-per-bookmark layout: [⭐] [icon title category]
+            # [download]. Multi-file groups collapse their downloads into a
+            # popover so the main row stays a single line. Preview and the
+            # modified date are intentionally dropped here — the Library
+            # tab is the place for browsing; this list is for grab-and-go.
+            for bi, b in enumerate(bookmarks):
                 icon = CATEGORY_ICONS.get(b["category"], "📄")
-                st.markdown(
-                    f"- {icon} **{b['title']}** "
-                    f"<span style='color:#A6B5E0;font-size:12px'>"
-                    f"_{b['category']}_</span>",
-                    unsafe_allow_html=True,
+                bm_key = f"home_bm_{bi}"
+                files = b.get("files", [])
+                n_files = len(files)
+
+                star_col, title_col, action_col = st.columns(
+                    [1, 8, 3], vertical_alignment="center",
                 )
+                with star_col:
+                    if st.button(
+                        "⭐",
+                        key=f"{bm_key}_unstar",
+                        help="Remove bookmark",
+                    ):
+                        _toggle_bookmark(b["entry_id"])
+                        st.rerun()
+                with title_col:
+                    cat_suffix = (
+                        f"{b['category']} · {n_files} files"
+                        if n_files > 1 else b["category"]
+                    )
+                    st.markdown(
+                        f"{icon} **{b['title']}** "
+                        f"<span style='color:#A6B5E0;font-size:11px'>"
+                        f"_{cat_suffix}_</span>",
+                        unsafe_allow_html=True,
+                    )
+                with action_col:
+                    if n_files == 0:
+                        st.caption("⚠ re-Sync needed")
+                    elif n_files == 1:
+                        _download_btn(files[0], key=f"{bm_key}_dl")
+                    else:
+                        with st.popover(
+                            f"⬇ {n_files} files",
+                            use_container_width=True,
+                        ):
+                            for fi, f in enumerate(files):
+                                _render_file_row(
+                                    f,
+                                    key=f"{bm_key}_f{fi}",
+                                    show_name=True,
+                                )
 
         st.markdown("#### 🗂 Recently added to Library")
         recent = _recent_library_entries(days=14, limit=10)
@@ -5247,5 +5774,34 @@ def render_comparator(
             st.caption("No property data found for the selected products.")
 
 
+def _safe_main() -> None:
+    """
+    Run main() with a top-level safety net that logs unhandled
+    exceptions to the feedback store as type='error'. The app still
+    raises so Streamlit's normal error UI shows — we just also persist
+    the failure so admins see it in the Inbox without users having to
+    manually report it.
+    """
+    import traceback as _tb
+    try:
+        main()
+    except Exception as e:
+        try:
+            import feedback_store
+            feedback_store.init_db()
+            feedback_store.submit(
+                user=auth.current_user() or "(unknown)",
+                type="error",
+                category="auto-captured",
+                title=f"{type(e).__name__}: {str(e)[:200]}",
+                body=str(e),
+                traceback=_tb.format_exc(),
+                context={"phase": "render"},
+            )
+        except Exception:
+            pass  # logging must never compound the original failure
+        raise
+
+
 if __name__ == "__main__":
-    main()
+    _safe_main()

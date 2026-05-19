@@ -20,6 +20,9 @@ testing fpt files.xlsx
 *.npz
 *.npy
 
+# In-app feedback database — populated at runtime, per-deployment
+feedback/
+
 # ---------------------------------------------------------------------------
 # Legacy / duplicate folders (per CLAUDE.md)
 # ---------------------------------------------------------------------------

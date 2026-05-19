@@ -22,6 +22,19 @@ def extract_text(filepath: str) -> str:
 
     if ext == ".docx":
         try:
+            # Some study docs have unusually large inline XML attributes
+            # (embedded equations, signature images, OLE blobs) that trip
+            # lxml's default 10 MB AttValue limit. Switch the global lxml
+            # parser to huge_tree mode before opening the doc — required
+            # to read AGN report files that exceed the default limit.
+            try:
+                from lxml import etree as _etree
+                _etree.set_default_parser(
+                    _etree.XMLParser(huge_tree=True)
+                )
+            except Exception:
+                pass
+
             from docx import Document
             doc = Document(str(p))
             parts = []

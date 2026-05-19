@@ -66,6 +66,10 @@ def post_chat(
     """
     POST to the ILIAD chat endpoint. Returns the raw Response; callers handle
     the response shape (SSE streaming vs. JSON) based on the `stream` flag.
+
+    verify=False is passed explicitly per-request as well as on the session,
+    because CML sets REQUESTS_CA_BUNDLE / SSL_CERT_FILE env vars that can
+    override the session's verify attribute. Per-request kwargs win.
     """
     payload: dict = {"messages": messages, "max_tokens": max_tokens}
     if stream:
@@ -76,6 +80,7 @@ def post_chat(
         headers=_headers(stream=stream),
         timeout=timeout,
         stream=stream,
+        verify=False,
     )
 
 
@@ -97,6 +102,7 @@ def embed(texts: list[str], api_key: str | None = None, timeout: int = 30) -> li
                 json={"input": texts},
                 headers={"x-api-key": key},
                 timeout=timeout,
+                verify=False,
             )
             resp.raise_for_status()
             data = resp.json()

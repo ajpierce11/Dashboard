@@ -2745,10 +2745,14 @@ def _retrieve_library_context(question: str) -> list[dict]:
 STUDY_FULLTEXT_CHAR_CAP = 70000
 
 # Total character budget for the assembled user message (library context +
-# product data + question). claude-4.5-sonnet has a 200k token window;
-# ~600k chars ≈ 150k tokens, leaving ~50k tokens for the system prompt,
-# conversation history, and the model's 8k-token reply.
-USER_MSG_CHAR_BUDGET = 600000
+# product data + question). claude-4.5-sonnet has a 200k token window. We
+# previously sized this at 600k chars (~150k tokens at ~4 chars/token), but
+# pharma context tokenizes denser (chemical names, study codes, tables hit
+# closer to ~3 chars/token) and ILIAD's CML-routed traffic was rejecting
+# 600k payloads as "Input is too long for requested model." 350k chars
+# (~90k-115k tokens) leaves comfortable headroom for system prompt,
+# history, and the 8k-token reply.
+USER_MSG_CHAR_BUDGET = 350000
 
 
 def _index_build_preflight(vs: VectorStore | None) -> str:

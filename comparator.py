@@ -2935,93 +2935,24 @@ def _stream_iliad(
     timeout: int = 180,
 ):
     """
-    Generator yielding text chunks from the ILIAD streaming chat endpoint.
-    Falls back to a non-streaming request if SSE parsing fails. Callers can
-    pass a larger max_tokens and timeout for long-running generation tasks
-    (e.g. the Report Generator, where 16k+ output tokens take several
-    minutes to stream).
+    Generator yielding the model's reply as a single chunk via a non-streaming
+    ILIAD call. Kept as a generator so existing call sites can keep using
+    st.write_stream. Callers can pass a larger max_tokens and timeout for
+    long-running generation tasks (e.g. the Report Generator).
     """
     if not iliad_client.get_api_key():
         yield "⚠️ ILIAD_API_KEY environment variable is not set. Please set it and restart the app."
         return
 
-    effective_max = max_tokens or ILIAD_MAX_TOKENS
-
-    try:
-        resp = iliad_client.post_chat(
-            messages, max_tokens=effective_max, stream=True, timeout=timeout
-        )
-        resp.raise_for_status()
-        resp.encoding = "utf-8"
-
-        emitted_any = False
-        buffered_data: list[str] = []
-
-        for raw in resp.iter_lines(decode_unicode=True):
-            if raw is None:
-                continue
-            # Some servers ignore decode_unicode and still yield bytes
-            if isinstance(raw, bytes):
-                try:
-                    raw = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    continue
-            line = raw.strip()
-            if not line:
-                # Blank line terminates an SSE event — parse accumulated data
-                if buffered_data:
-                    payload_str = "".join(buffered_data).strip()
-                    buffered_data = []
-                    if payload_str == "[DONE]":
-                        break
-                    try:
-                        payload = json.loads(payload_str)
-                    except Exception:
-                        continue
-                    chunk = _extract_chunk_text(payload)
-                    if chunk:
-                        emitted_any = True
-                        yield chunk
-                continue
-            if line.startswith(":"):
-                continue  # SSE comment/heartbeat
-            if line.startswith("data:"):
-                buffered_data.append(line[5:].lstrip())
-            elif line.startswith("event:"):
-                continue  # event type handled by payload shape
-            else:
-                buffered_data.append(line)
-
-        # Flush any trailing payload that wasn't terminated by a blank line
-        if buffered_data:
-            payload_str = "".join(buffered_data).strip()
-            if payload_str and payload_str != "[DONE]":
-                try:
-                    payload = json.loads(payload_str)
-                    chunk = _extract_chunk_text(payload)
-                    if chunk:
-                        emitted_any = True
-                        yield chunk
-                except Exception:
-                    pass
-
-        if emitted_any:
-            return
-
-        # Streaming produced no parseable text — fall through to non-streaming
-        # so the user always gets an answer.
-        for chunk in _call_iliad_nonstreaming(
-            messages, max_tokens=effective_max, timeout=timeout,
-        ):
-            yield chunk
-
-    except requests.exceptions.Timeout:
-        yield "⚠️ Request timed out. The API may be busy — please try again."
-    except requests.exceptions.HTTPError as e:
-        yield _format_http_error(e)
-    except Exception as e:
-        print(f"[_stream_iliad] {type(e).__name__}: {e}")
-        yield "⚠️ Connection to the LLM gateway failed. Please try again."
+    # CML's egress proxy drops long-lived SSE streams partway through, which
+    # surfaces as a generic "connection failed" once an answer gets long.
+    # Non-streaming uses one request/response and avoids that. The AI
+    # Assistant UI already waits for the full reply before rendering, so
+    # losing token-by-token streaming has no visible downside.
+    for chunk in _call_iliad_nonstreaming(
+        messages, max_tokens=max_tokens, timeout=timeout,
+    ):
+        yield chunk
 
 
 def _format_http_error(e: requests.exceptions.HTTPError) -> str:
@@ -3088,7 +3019,10 @@ def _call_iliad_nonstreaming(
         yield _format_http_error(e)
     except Exception as e:
         print(f"[_call_iliad_nonstreaming] {type(e).__name__}: {e}")
-        yield "⚠️ Connection to the LLM gateway failed. Please try again."
+        yield (
+            "⚠️ Connection to the LLM gateway failed. Please try again.\n\n"
+            f"`{type(e).__name__}: {e}`"
+        )
 
 
 def _call_iliad(messages: list[dict]) -> str:

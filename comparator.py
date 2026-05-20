@@ -2958,12 +2958,13 @@ def _stream_iliad(
 def _format_http_error(e: requests.exceptions.HTTPError) -> str:
     """
     Turn a gateway error into a short user-facing line. Full body goes to
-    the terminal so admins can still diagnose, but the chat pane stays
-    readable — ILIAD error responses can be multi-KB HTML.
+    the terminal so admins can still diagnose, but a short preview is
+    inlined into the chat for 400/4xx so users can see why ILIAD rejected
+    the request without hunting through logs.
     """
     status = getattr(e.response, "status_code", "?")
     try:
-        body_preview = e.response.text[:200] if e.response is not None else ""
+        body_preview = e.response.text[:400] if e.response is not None else ""
     except Exception:
         body_preview = ""
     print(f"[iliad] HTTP {status}: {body_preview}")
@@ -2973,7 +2974,10 @@ def _format_http_error(e: requests.exceptions.HTTPError) -> str:
         return "⚠️ Rate limited by the LLM gateway. Wait a moment and retry."
     if isinstance(status, int) and 500 <= status < 600:
         return "⚠️ The LLM gateway returned a server error. Try again in a moment."
-    return f"⚠️ LLM gateway returned HTTP {status}. Try again shortly."
+    base = f"⚠️ LLM gateway returned HTTP {status}. Try again shortly."
+    if body_preview:
+        base += f"\n\n`{body_preview.strip()}`"
+    return base
 
 
 def _call_iliad_nonstreaming(

@@ -5315,6 +5315,30 @@ def render_home(
         "any tab. Use this as your starting point each day."
     )
 
+    # TEMP DIAGNOSTIC — dump request headers so we can see which one
+    # CML uses to identify the viewer. Remove once auth.py is updated
+    # with the right header name.
+    with st.expander("🔍 Debug: incoming request headers (temporary)"):
+        try:
+            ctx_headers = getattr(st, "context", None)
+            ctx_headers = getattr(ctx_headers, "headers", None) if ctx_headers else None
+            if ctx_headers:
+                hdr_dict = {k: v for k, v in dict(ctx_headers).items()}
+                st.json(hdr_dict)
+            else:
+                st.write("st.context.headers is not available in this Streamlit version.")
+        except Exception as e:
+            st.write(f"Could not read headers: {e}")
+        try:
+            cdsw_envs = {
+                k: v for k, v in os.environ.items()
+                if k.startswith("CDSW_") or k in ("HADOOP_USER_NAME", "USER", "USERNAME")
+            }
+            st.write("Process env (deployer-side, for comparison):")
+            st.json(cdsw_envs)
+        except Exception:
+            pass
+
     # Admin-only: trigger an incremental AI-metadata refresh.
     if auth.is_admin():
         adm_col, _ = st.columns([1, 4])

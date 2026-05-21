@@ -20,15 +20,85 @@ from __future__ import annotations
 import os
 
 
+_HEADER_CANDIDATES = (
+    "Remote-User",
+    "X-Remote-User",
+    "X-Forwarded-User",
+    "X-Forwarded-Preferred-Username",
+    "X-Forwarded-Email",
+    "Cdsw-User",
+    "X-Cdsw-User",
+    "X-Auth-Username",
+    "X-User",
+    "X-Knox-User",
+    "Knox-User",
+)
+
+
+def _user_from_request_headers() -> str:
+    """
+    Pull the viewer's identity from the incoming HTTP request headers.
+
+    On CML the app process is owned by whoever deployed it, so env vars
+    like CDSW_USER reflect the deployer — not the person whose browser
+    is currently hitting the app. CML's Knox gateway stamps the actual
+    viewer into a request header; we try the names commonly used.
+    Returns "" if nothing is found or Streamlit context isn't available.
+    """
+    try:
+        import streamlit as st
+        headers = getattr(st, "context", None)
+        headers = getattr(headers, "headers", None) if headers else None
+        if not headers:
+            return ""
+        # st.context.headers is dict-like and case-insensitive in practice;
+        # normalize anyway so we don't miss a different casing.
+        normalized = {}
+        try:
+            for k, v in dict(headers).items():
+                normalized[k.lower()] = v
+        except Exception:
+            return ""
+        for name in _HEADER_CANDIDATES:
+            v = normalized.get(name.lower())
+            if v:
+                v = str(v).strip()
+                # Some gateways pass an email — strip the @domain so it
+                # matches the bare-username form used in DASHBOARD_ADMINS.
+                if "@" in v:
+                    v = v.split("@", 1)[0]
+                if v:
+                    return v
+        return ""
+    except Exception:
+        return ""
+
+
 def current_user() -> str:
     """
-    Return the username of the person running this Streamlit session.
+    Return the username of the person currently viewing the app.
 
-    CML injects `HADOOP_USER_NAME` and/or `CDSW_USER`; locally we fall
-    back to the standard shell env vars. Returns an empty string if
-    nothing is set (shouldn't happen in practice).
+    Order of resolution:
+      1. HTTP request headers (CML / reverse-proxy injected) — this is
+         the only source that distinguishes one viewer from another on
+         a shared deployment.
+      2. Local-dev env-var fallback (USERNAME / USER) — only used when
+         not on CML, since on CML those vars resolve to the deployer.
+
+    Returns an empty string if nothing is available; callers should
+    treat that as "unknown viewer" (not admin, no bookmarks, etc.).
     """
-    for var in ("CDSW_USER", "HADOOP_USER_NAME", "USERNAME", "USER"):
+    user = _user_from_request_headers()
+    if user:
+        return user
+
+    if _on_cml():
+        # On CML, refusing to fall back to env vars is the whole point:
+        # CDSW_USER is the deployer, not the viewer, so using it would
+        # make every teammate appear to be the deployer.
+        return ""
+
+    for var in ("USERNAME", "USER"):
         val = os.environ.get(var, "").strip()
         if val:
             return val

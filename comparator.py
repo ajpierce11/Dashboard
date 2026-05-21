@@ -4577,6 +4577,103 @@ def _workbook_freshness_caption() -> str:
         return "workbook: unknown"
 
 
+def _render_roster_admin() -> None:
+    """
+    Admin-only panel to manage the list of names viewers can pick from
+    on the login screen. Stored as a JSON list at
+    Library/.user_prefs/roster.json on the shared drive.
+
+    Removing a name does NOT log out anyone whose cookie already holds
+    that name — it just stops new viewers from selecting it. Existing
+    bookmarks under that name are untouched.
+    """
+    with st.expander("👥 User roster (admin)"):
+        st.caption(
+            "Names listed here appear in the dropdown that non-admin "
+            "viewers see on first visit. Stored at "
+            "`Library/.user_prefs/roster.json`."
+        )
+        roster = auth.load_roster()
+
+        if roster:
+            for name in roster:
+                row_left, row_right = st.columns([5, 1])
+                row_left.write(name)
+                if row_right.button(
+                    "Remove", key=f"_roster_rm_{name}",
+                    use_container_width=True,
+                ):
+                    auth.save_roster([n for n in roster if n != name])
+                    st.rerun()
+        else:
+            st.info("Roster is empty. Add names below.")
+
+        with st.form("_roster_add_form", clear_on_submit=True):
+            new_name = st.text_input(
+                "Add a name",
+                placeholder="e.g. jsmith",
+                help="Letters, digits, spaces, dot, dash, underscore only.",
+            )
+            if st.form_submit_button("Add to roster"):
+                cleaned = (new_name or "").strip()
+                if cleaned:
+                    auth.save_roster(roster + [cleaned])
+                    st.rerun()
+
+
+def _login_gate() -> None:
+    """
+    Block the app for non-admin viewers who haven't picked a name yet.
+
+    On CML, only the deployer's connection carries `Remote-User`; every
+    other viewer hits the app anonymous. Rather than make them all share
+    a single profile, we ask each viewer to claim a name from an admin-
+    managed roster (Library/.user_prefs/roster.json). The choice is
+    stored in a year-long cookie keyed `dashboard_user`, so they only
+    see the picker on first visit / after clearing cookies.
+
+    Admins (real Remote-User in DASHBOARD_ADMINS) bypass the gate so
+    they can manage the roster even before they're listed in it.
+    """
+    if auth.current_user():
+        return  # already identified
+
+    # Admins always pass through — they need to manage the roster.
+    if auth.is_admin():
+        return
+
+    st.markdown("### Welcome to the Testing Dashboard 👋")
+    st.caption(
+        "Pick your name to continue. Your bookmarks and preferences "
+        "will be remembered for this name across sessions."
+    )
+
+    roster = auth.load_roster()
+    if not roster:
+        st.warning(
+            f"No names have been added to the roster yet. Ask "
+            f"**{auth.admin_contact()}** to add you, then refresh this page."
+        )
+        st.stop()
+
+    pick = st.selectbox(
+        "Your name",
+        options=[""] + roster,
+        index=0,
+        format_func=lambda v: "— select —" if v == "" else v,
+        key="_login_pick",
+    )
+    cont_col, _ = st.columns([1, 4])
+    with cont_col:
+        if st.button("Continue", type="primary", use_container_width=True,
+                     disabled=not pick):
+            auth.set_user_cookie(pick)
+            # set_user_cookie reloads the page from the browser; stop
+            # here so we don't render any further UI in this run.
+            st.stop()
+    st.stop()
+
+
 def _render_user_status_badge() -> None:
     """
     Compact top-right badge showing the current user and whether the AI
@@ -4584,7 +4681,7 @@ def _render_user_status_badge() -> None:
     wanted the space back, and user/AI status was the only part of the
     sidebar worth keeping always-visible.
     """
-    user = auth.current_user() or "unknown"
+    user = auth.current_user_display() or "unknown"
     role = "admin" if auth.is_admin() else "viewer"
     user_icon = "🛠" if role == "admin" else "👤"
     ai_ok = bool(iliad_client.get_api_key())
@@ -4598,6 +4695,19 @@ def _render_user_status_badge() -> None:
         f"</div>",
         unsafe_allow_html=True,
     )
+
+    # "Switch user" only makes sense for cookie-identified viewers —
+    # admins are identified by the gateway header and clearing the
+    # cookie wouldn't change anything for them.
+    if not auth.is_admin():
+        sw_left, sw_right = st.columns([3, 2])
+        with sw_right:
+            if st.button("Switch user", key="_switch_user_btn",
+                         use_container_width=True,
+                         help="Clear your saved name and pick a different "
+                              "one on the login screen."):
+                auth.clear_user_cookie()
+                st.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -4925,6 +5035,10 @@ def main() -> None:
             }
         </style>
     """, unsafe_allow_html=True)
+
+    # Block the app until the viewer has identified themselves so
+    # bookmarks/preferences are isolated per person.
+    _login_gate()
 
     # --- Load data ---
     try:
@@ -5308,72 +5422,12 @@ def render_home(
     with a single screen that shows library activity and quick links.
     """
     st.markdown(
-        f"### Welcome, {auth.current_user() or 'there'} 👋"
+        f"### Welcome, {auth.current_user_display() or 'there'} 👋"
     )
     st.caption(
         "Fresh activity across the Library and a quick way to hop into "
         "any tab. Use this as your starting point each day."
     )
-
-    # TEMP DIAGNOSTIC — dump request headers so we can see which one
-    # CML uses to identify the viewer, and log every visit's headers
-    # to a file so we can inspect colleagues' sessions without a live
-    # debug. Remove once auth.py is updated with the right header name.
-    _debug_log = Path(__file__).resolve().parent / "viewer_headers_debug.log"
-    try:
-        ctx_headers = getattr(st, "context", None)
-        ctx_headers = getattr(ctx_headers, "headers", None) if ctx_headers else None
-        if ctx_headers:
-            _hdr_dict = {k: v for k, v in dict(ctx_headers).items()}
-        else:
-            _hdr_dict = {"_error": "st.context.headers unavailable"}
-        # Append one JSONL line per visit so we can browse recent
-        # viewers' headers after the fact.
-        with open(_debug_log, "a", encoding="utf-8") as _f:
-            _f.write(json.dumps({
-                "ts": datetime.now().isoformat(timespec="seconds"),
-                "resolved_user": auth.current_user(),
-                "headers": _hdr_dict,
-            }) + "\n")
-    except Exception:
-        pass
-
-    with st.expander("🔍 Debug: incoming request headers (temporary)"):
-        try:
-            if ctx_headers:
-                st.write("**Your current session's headers:**")
-                st.json(_hdr_dict)
-            else:
-                st.write("st.context.headers is not available in this Streamlit version.")
-        except Exception as e:
-            st.write(f"Could not read headers: {e}")
-        try:
-            cdsw_envs = {
-                k: v for k, v in os.environ.items()
-                if k.startswith("CDSW_") or k in ("HADOOP_USER_NAME", "USER", "USERNAME")
-            }
-            st.write("**Process env (deployer-side, for comparison):**")
-            st.json(cdsw_envs)
-        except Exception:
-            pass
-        # Show the last 20 entries from the visit log so the deployer
-        # can see what colleagues' sessions sent without a live debug.
-        st.write("**Recent visits (most recent last):**")
-        try:
-            if _debug_log.exists():
-                lines = _debug_log.read_text(encoding="utf-8").splitlines()
-                recent = lines[-20:]
-                parsed = []
-                for ln in recent:
-                    try:
-                        parsed.append(json.loads(ln))
-                    except Exception:
-                        parsed.append({"_raw": ln})
-                st.json(parsed)
-            else:
-                st.write("(no visits logged yet)")
-        except Exception as e:
-            st.write(f"Could not read visit log: {e}")
 
     # Admin-only: trigger an incremental AI-metadata refresh.
     if auth.is_admin():
@@ -5385,6 +5439,8 @@ def render_home(
                               "timepoints) per study. Incremental — only "
                               "new/changed studies are re-processed."):
                 _refresh_ai_metadata()
+
+        _render_roster_admin()
 
     col_left, col_right = st.columns([3, 2], gap="large")
 

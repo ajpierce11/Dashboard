@@ -5316,15 +5316,33 @@ def render_home(
     )
 
     # TEMP DIAGNOSTIC — dump request headers so we can see which one
-    # CML uses to identify the viewer. Remove once auth.py is updated
-    # with the right header name.
+    # CML uses to identify the viewer, and log every visit's headers
+    # to a file so we can inspect colleagues' sessions without a live
+    # debug. Remove once auth.py is updated with the right header name.
+    _debug_log = Path(__file__).resolve().parent / "viewer_headers_debug.log"
+    try:
+        ctx_headers = getattr(st, "context", None)
+        ctx_headers = getattr(ctx_headers, "headers", None) if ctx_headers else None
+        if ctx_headers:
+            _hdr_dict = {k: v for k, v in dict(ctx_headers).items()}
+        else:
+            _hdr_dict = {"_error": "st.context.headers unavailable"}
+        # Append one JSONL line per visit so we can browse recent
+        # viewers' headers after the fact.
+        with open(_debug_log, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "resolved_user": auth.current_user(),
+                "headers": _hdr_dict,
+            }) + "\n")
+    except Exception:
+        pass
+
     with st.expander("🔍 Debug: incoming request headers (temporary)"):
         try:
-            ctx_headers = getattr(st, "context", None)
-            ctx_headers = getattr(ctx_headers, "headers", None) if ctx_headers else None
             if ctx_headers:
-                hdr_dict = {k: v for k, v in dict(ctx_headers).items()}
-                st.json(hdr_dict)
+                st.write("**Your current session's headers:**")
+                st.json(_hdr_dict)
             else:
                 st.write("st.context.headers is not available in this Streamlit version.")
         except Exception as e:
@@ -5334,10 +5352,28 @@ def render_home(
                 k: v for k, v in os.environ.items()
                 if k.startswith("CDSW_") or k in ("HADOOP_USER_NAME", "USER", "USERNAME")
             }
-            st.write("Process env (deployer-side, for comparison):")
+            st.write("**Process env (deployer-side, for comparison):**")
             st.json(cdsw_envs)
         except Exception:
             pass
+        # Show the last 20 entries from the visit log so the deployer
+        # can see what colleagues' sessions sent without a live debug.
+        st.write("**Recent visits (most recent last):**")
+        try:
+            if _debug_log.exists():
+                lines = _debug_log.read_text(encoding="utf-8").splitlines()
+                recent = lines[-20:]
+                parsed = []
+                for ln in recent:
+                    try:
+                        parsed.append(json.loads(ln))
+                    except Exception:
+                        parsed.append({"_raw": ln})
+                st.json(parsed)
+            else:
+                st.write("(no visits logged yet)")
+        except Exception as e:
+            st.write(f"Could not read visit log: {e}")
 
     # Admin-only: trigger an incremental AI-metadata refresh.
     if auth.is_admin():
